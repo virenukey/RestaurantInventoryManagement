@@ -112,9 +112,8 @@ class DishIngredientUpdate(BaseModel):
 
 class DishUpdate(BaseModel):
     name: Optional[str] = None
-    type_name: Optional[str] = None
+    type: Optional[str] = None
     ingredients: Optional[List[DishIngredientUpdate]] = None
-
 
 
 Base.metadata.create_all(bind=engine)
@@ -624,6 +623,12 @@ def delete_dish_by_name(
     db.commit()
     return {"message": f"Dish '{dish.name}' deleted successfully"}
 
+@app.get("/dish_types")
+def get_dish_types(db: Session = Depends(get_db)):
+    dish_types = db.query(DishType).all()
+    return [dt.name for dt in dish_types]
+
+
 @app.get("/dishes/{dish_id}/cost")
 def get_dish_cost(dish_id: int, db: Session = Depends(get_db)):
     dish = db.query(Dish).filter(Dish.id == dish_id).first()
@@ -645,6 +650,52 @@ def get_dish_cost(dish_id: int, db: Session = Depends(get_db)):
         "dish_name": dish.name,
         "total_cost": round(total_cost, 2)
     }
+
+@app.put("/dishes/{dish_id}")
+def update_dish(dish_id: int, payload: DishUpdate, db: Session = Depends(get_db)):
+    dish = db.query(Dish).filter(Dish.id == dish_id).first()
+    if not dish:
+        raise HTTPException(status_code=404, detail="Dish not found")
+
+    # Update dish name and type
+    dish.name = payload.name
+
+    # Lookup dish type
+    dish_type = db.query(DishType).filter(DishType.name.ilike(payload.type)).first()
+    if not dish_type:
+        dish_type = DishType(name=payload.type)
+        db.add(dish_type)
+        db.commit()
+        db.refresh(dish_type)
+
+    dish.type_id = dish_type.id
+    db.commit()
+
+    dish_ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
+
+    # Update ingredients: map by name for easy comparison
+    existing_ingredients = {di.ingredient_name.lower(): di for di in dish_ingredients}
+    updated_names = {ing.ingredient_name.lower() for ing in payload.ingredients}
+
+    for ing in payload.ingredients:
+        key = ing.ingredient_name.lower()
+        if key in existing_ingredients:
+            existing_ingredients[key].quantity_required = ing.quantity_required
+        else:
+            db.add(DishIngredient(
+                dish_id=dish.id,
+                ingredient_name=ing.ingredient_name,
+                quantity_required=ing.quantity_required
+            ))
+
+    # Delete ingredients no longer in request
+
+    for key, di in existing_ingredients.items():
+        if key not in updated_names:
+            db.delete(di)
+
+    db.commit()
+    return {"message": "Dish updated successfully"}
 
 
 @app.post("/prepare_dish")
@@ -690,9 +741,6 @@ def prepare_dish(dish_id: int, quantity: float, db: Session = Depends(get_db)):
 
     db.commit()
     return {"message": "Dish prepared using FIFO inventory. Inventory updated!"}
-
-
-
 
 
 

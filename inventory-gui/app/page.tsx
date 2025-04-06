@@ -47,6 +47,10 @@ export default function InventoryApp() {
      "Dairy", "Non-Veg", "Maintanance", "Misc", "Grocery", "Cleaning", "Crockery", "Cutlery",
      "Beverages", "Tableware", "Linens", "Disposables", "Dry fruits", "Fruits", "Chocolates", "Bakery", "Cooking Gas"];
 
+  const predefinedDishTypes = ["South Indian", "Indian Snacks", "PARATHAS", "BEVERAGES", "SANDWITCHES",
+      "Burgers", "PIZZA", "PASTA", "SHAKES", "SOUPS", "INDIAN STARTER", "INDIAN MAIN COURSE", "CHINESE STARTER",
+      "CHINESE Main Course", "CONTINENTAL", "DESSERT"];
+
  const [searchQuery, setSearchQuery] =  useState("");
  const [startDate, setStartDate] = useState("");
  const [endDate, setEndDate] = useState("");
@@ -824,13 +828,21 @@ export default function InventoryApp() {
           />
         </div>
         <div>
-          <Label>Dish Type</Label>
-          <Input
-            value={dishType}
-            onChange={(e) => setDishType(e.target.value)}
-            required
-          />
-        </div>
+  <Label>Dish Type</Label>
+  <select
+    value={dishType}
+    onChange={(e) => setDishType(e.target.value)}
+    required
+    className="w-full border rounded p-2"
+  >
+    <option value="" disabled>Select dish type</option>
+    {predefinedDishTypes.map((type) => (
+      <option key={type} value={type}>
+        {type}
+      </option>
+    ))}
+  </select>
+</div>
 
         <div>
           <Label className="block mb-2">Ingredients</Label>
