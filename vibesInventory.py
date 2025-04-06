@@ -4,12 +4,12 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+from typing import Optional, List
 from collections import defaultdict
 from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
 from io import BytesIO
-#from models import Expense
+from pydantic import BaseModel
 
 
 DATABASE_URL = "sqlite:///./inventory.db"
@@ -70,11 +70,11 @@ class Dish(Base):
 class DishIngredient(Base):
     __tablename__ = "dish_ingredients"
     id = Column(Integer, primary_key=True, index=True)
+    ingredient_name = Column(String, index=True)  # <- ingredient name (e.g., "Tomato")
     dish_id = Column(Integer, ForeignKey("dishes.id"))
-    ingredient_id = Column(Integer, ForeignKey("inventory.id"))
     quantity_required = Column(Float)
     dish = relationship("Dish")
-    ingredient = relationship("Inventory")
+
 
 class InventoryLog(Base):
     __tablename__ = "inventory_log"
@@ -83,6 +83,39 @@ class InventoryLog(Base):
     quantity_left = Column(Float)
     date = Column(DateTime, default=datetime.utcnow)
     ingredient = relationship("Inventory")
+
+class IngredientInput(BaseModel):
+    name: str
+    quantity_required: float
+
+class AddDishRequest(BaseModel):
+    name: str
+    type: str
+    ingredients: List[IngredientInput]
+
+class DishIngredientOut(BaseModel):
+    ingredient_name: str
+    quantity_required: float
+
+class DishOut(BaseModel):
+    id: int
+    name: str
+    type: str
+    ingredients: List[DishIngredientOut]
+
+    class Config:
+        orm_mode = True
+
+class DishIngredientUpdate(BaseModel):
+    ingredient_name: str
+    quantity_required: float
+
+class DishUpdate(BaseModel):
+    name: Optional[str] = None
+    type_name: Optional[str] = None
+    ingredients: Optional[List[DishIngredientUpdate]] = None
+
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -470,25 +503,194 @@ async def upload_inventory_excel(file: UploadFile = File(...), db: Session = Dep
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+@app.post("/add_dish")
+def add_dish(request: AddDishRequest, db: Session = Depends(get_db)):
+    # Check if dish with same name exists
+    existing_dish = db.query(Dish).filter(Dish.name == request.name).first()
+    if existing_dish:
+        raise HTTPException(status_code=400, detail="Dish with this name already exists.")
+
+    # Get or create DishType
+    dish_type = db.query(DishType).filter(DishType.name == request.type).first()
+    if not dish_type:
+        dish_type = DishType(name=request.type)
+        db.add(dish_type)
+        db.commit()
+        db.refresh(dish_type)
+
+    # Create new dish
+    new_dish = Dish(name=request.name, type_id=dish_type.id)
+    db.add(new_dish)
+    db.commit()
+    db.refresh(new_dish)
+
+    # Process ingredients
+    for ing in request.ingredients:
+        #inventory_item = db.query(Inventory).filter(Inventory.name == ing.name).first()
+        #if not inventory_item:
+            #raise HTTPException(status_code=404, detail=f"Ingredient '{ing.name}' not found in inventory.")
+
+        dish_ingredient = DishIngredient(
+            dish_id=new_dish.id,
+            #ingredient_name=inventory_item.name,
+            ingredient_name=ing.name,
+            quantity_required=ing.quantity_required
+        )
+        db.add(dish_ingredient)
+
+    db.commit()
+    return {"message": f"Dish '{request.name}' added successfully with ingredients."}
+
+@app.get("/dishes", response_model=List[DishOut])
+def list_dishes(db: Session = Depends(get_db)):
+    dishes = db.query(Dish).all()
+    result = []
+
+    for dish in dishes:
+        # Get the dish type name
+        dish_type = db.query(DishType).filter(DishType.id == dish.type_id).first()
+
+        # Get all ingredients for this dish
+        ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
+
+        # Convert DishIngredient DB entries to response models
+        ingredient_list = [
+            DishIngredientOut(
+                ingredient_name=di.ingredient_name,
+                quantity_required=di.quantity_required
+            ) for di in ingredients if di.ingredient_name is not None
+        ]
+
+        # Append formatted dish to result
+        result.append(DishOut(
+            id=dish.id,
+            name=dish.name,
+            type=dish_type.name if dish_type else "Unknown",
+            ingredients=ingredient_list
+        ))
+
+    return result
+
+
+@app.get("/dishes/by_name", response_model=List[DishOut])
+def search_dishes_by_name(partial_name: str, db: Session = Depends(get_db)):
+    matched_dishes = db.query(Dish).filter(
+        Dish.name.ilike(f"%{partial_name}%")
+    ).all()
+
+    if not matched_dishes:
+        raise HTTPException(status_code=404, detail="No matching dishes found")
+
+    result = []
+    for dish in matched_dishes:
+        dish_type = db.query(DishType).filter(DishType.id == dish.type_id).first()
+        ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
+
+        ingredient_list = [
+            DishIngredientOut(
+                ingredient_name=di.ingredient_name,
+                quantity_required=di.quantity_required
+            )
+            for di in ingredients
+        ]
+
+        result.append(DishOut(
+            id=dish.id,
+            name=dish.name,
+            type=dish_type.name if dish_type else "Unknown",
+            ingredients=ingredient_list
+        ))
+
+    return result
+
+@app.delete("/dishes/{dish_name}")
+def delete_dish_by_name(
+    dish_name: str,
+    confirm: bool = Query(False, description="Set to true to confirm deletion"),
+    db: Session = Depends(get_db)
+):
+    dish = db.query(Dish).filter(Dish.name.ilike(dish_name)).first()
+    if not dish:
+        raise HTTPException(status_code=404, detail="Dish not found")
+
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Deletion not confirmed. To delete dish '{dish.name}', set confirm=true."
+        )
+
+    db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).delete()
+    db.delete(dish)
+    db.commit()
+    return {"message": f"Dish '{dish.name}' deleted successfully"}
+
+@app.get("/dishes/{dish_id}/cost")
+def get_dish_cost(dish_id: int, db: Session = Depends(get_db)):
+    dish = db.query(Dish).filter(Dish.id == dish_id).first()
+    if not dish:
+        raise HTTPException(status_code=404, detail="Dish not found")
+
+    ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
+    total_cost = 0.0
+
+    for di in ingredients:
+        inventory_item = db.query(Inventory).filter(Inventory.name == di.ingredient_name).order_by(Inventory.date).first()
+        if not inventory_item:
+            raise HTTPException(status_code=400, detail=f"Ingredient '{di.ingredient_name}' not found in inventory")
+        item_cost = di.quantity_required * inventory_item.unit_price
+        total_cost += item_cost
+
+    return {
+        "dish_id": dish.id,
+        "dish_name": dish.name,
+        "total_cost": round(total_cost, 2)
+    }
+
+
 @app.post("/prepare_dish")
 def prepare_dish(dish_id: int, quantity: float, db: Session = Depends(get_db)):
     dish_ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish_id).all()
+
     if not dish_ingredients:
         raise HTTPException(status_code=404, detail="Dish not found or has no ingredients")
 
     for ingredient in dish_ingredients:
-        required_quantity = ingredient.quantity_required * quantity
-        inventory_item = db.query(Inventory).filter(Inventory.id == ingredient.ingredient_id).first()
+        required_qty = ingredient.quantity_required * quantity
 
-        if not inventory_item or inventory_item.quantity < required_quantity:
-            raise HTTPException(status_code=400, detail=f"Not enough {inventory_item.name} in inventory")
+        # Fetch all inventory batches for this ingredient, ordered by date_added (FIFO)
+        inventory_batches = db.query(Inventory).filter(
+            Inventory.name == ingredient.ingredient.name,  # Assuming FK to InventoryItem with `name`
+            Inventory.quantity > 0
+        ).order_by(Inventory.date_added.asc()).all()
 
-        inventory_item.quantity -= required_quantity
-        db.add(InventoryLog(ingredient_id=ingredient.ingredient_id, quantity_left=inventory_item.quantity,
-                            date=datetime.utcnow()))
+        if not inventory_batches:
+            raise HTTPException(status_code=400, detail=f"No inventory available for {ingredient.ingredient.name}")
+
+        # Deduct from batches in FIFO order
+        for batch in inventory_batches:
+            if required_qty <= 0:
+                break
+
+            deduct_qty = min(batch.quantity, required_qty)
+            batch.quantity -= deduct_qty
+            required_qty -= deduct_qty
+
+            db.add(batch)
+            db.add(InventoryLog(
+                ingredient_id=batch.id,
+                quantity_left=batch.quantity,
+                date=datetime.utcnow()
+            ))
+
+        if required_qty > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough {ingredient.ingredient.name} in inventory to prepare {quantity} servings"
+            )
 
     db.commit()
-    return {"message": "Dish prepared, inventory updated!"}
+    return {"message": "Dish prepared using FIFO inventory. Inventory updated!"}
+
 
 
 

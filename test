@@ -1,0 +1,45 @@
+ const handleAddDishType = async () => {
+    await axios.post(`${API_URL}/add_dish_type`, null, {
+      params: { name: newDishType },
+    });
+    setNewDishType("");
+    fetchDishTypes();
+  };
+
+  const handleLinkIngredient = async () => {
+    await axios.post(`${API_URL}/link_ingredient`, null, {
+      params: ingredientLink,
+    });
+    setIngredientLink({ dish_id: "", ingredient_id: "", quantity_required: "" });
+    fetchDishIngredients();
+  };
+
+  async function handleAddDish({
+  name,
+  type,
+  ingredients,
+}: {
+  name: string;
+  type: string;
+  ingredients: { name: string; quantity_required: number }[];
+}) {
+  try {
+    const response = await axios.post("http://localhost:8000/add_dish", {
+      name,
+      type,
+      ingredients,
+    });
+
+    return {
+      success: true,
+      message: response.data.message,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      message:
+        error.response?.data?.detail ||
+        "An error occurred while adding the dish.",
+    };
+  }
+}

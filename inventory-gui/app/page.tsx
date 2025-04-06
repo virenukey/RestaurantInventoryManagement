@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Plus, X } from "lucide-react";
+import DishList from "@/components/ui/DishList";
 
 const API_URL = "http://localhost:8000";
 
@@ -38,19 +40,10 @@ export default function InventoryApp() {
   const [selectedItem, setSelectedItem] = useState(null);
   const [selectedInventoryName, setSelectedInventoryName] = useState("");
   const unitOptions = ["kg", "gm", "litre", "ml", "piece", "pack", "bottle", "single"];
-  const quantityOptions = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
- "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
- "21", "22", "23", "24", "25", "26", "27", "28", "29", "30",
- "31", "32", "33", "34", "35", "36", "37", "38", "39", "40",
- "41", "42", "43", "44", "45", "46", "47", "48", "49", "50",
- "51", "52", "53", "54", "55", "56", "57", "58", "59", "60",
- "61", "62", "63", "64", "65", "66", "67", "68", "69", "70",
- "71", "72", "73", "74", "75", "76", "77", "78", "79", "80",
- "81", "82", "83", "84", "85", "86", "87", "88", "89", "90",
- "91", "92", "93", "94", "95", "96", "97", "98", "99", "100"];
- const [showInventory, setShowInventory] = useState(false);
+  const [activeTab, setActiveTab] = useState<"inventory" | "dishes" | "remaining">("inventory");
+  const [showInventory, setShowInventory] = useState(false);
 
- const typeOptions = ["Oil", "Vegetables", "Spices", "Bun", "Pizza base", "Sauses", "Grains",
+  const typeOptions = ["Oil", "Vegetables", "Spices", "Bun", "Pizza base", "Sauses", "Grains",
      "Dairy", "Non-Veg", "Maintanance", "Misc", "Grocery", "Cleaning", "Crockery", "Cutlery",
      "Beverages", "Tableware", "Linens", "Disposables", "Dry fruits", "Fruits", "Chocolates", "Bakery", "Cooking Gas"];
 
@@ -64,15 +57,56 @@ export default function InventoryApp() {
   skipped_rows: string[];
 } | null>(null);
 
+ const [dishName, setDishName] = useState("");
+  const [dishType, setDishType] = useState("");
+  const [ingredients, setIngredients] = useState([
+    { name: "", quantity: "" },
+  ]);
+
  const [status, setStatus] = useState<string | null>(null);
 
 
+  const handleIngredientChange = (index: number, field: string, value: string) => {
+    const updated = [...ingredients];
+    updated[index][field] = value;
+    setIngredients(updated);
+  };
 
+  const addIngredient = () => {
+    setIngredients([...ingredients, { name: "", quantity: "" }]);
+  };
 
+  const removeIngredient = (index: number) => {
+    const updated = [...ingredients];
+    updated.splice(index, 1);
+    setIngredients(updated);
+  };
 
+  const handleAddDish = async (e: React.FormEvent) => {
+  e.preventDefault();
 
+  const payload = {
+    name: dishName,
+    type: dishType,
+    ingredients: ingredients.map((ing) => ({
+      name: ing.name, // change this to 'name' to match FastAPI schema
+      quantity_required: parseFloat(ing.quantity),
+    })),
+  };
 
-  const fetchInventory = async () => {
+  try {
+    const response = await axios.post("http://localhost:8000/add_dish", payload);
+    alert(response.data.message || "Dish added successfully!");
+    setDishName("");
+    setDishType("");
+    setIngredients([{ name: "", quantity: "" }]);
+  } catch (error: any) {
+    alert(error.response?.data?.detail || "Failed to add dish.");
+    console.error(error);
+  }
+};
+
+ const fetchInventory = async () => {
   try {
     const res = await axios.get(`${API_URL}/inventory`);
     setInventory(res.data);
@@ -209,10 +243,6 @@ export default function InventoryApp() {
   }
 };
 
-
-
-
-
   useEffect(() => {
     fetchInventory();
 
@@ -309,33 +339,6 @@ export default function InventoryApp() {
     }
   };
 
-
-
-
-  const handleAddDish = async () => {
-    await axios.post(`${API_URL}/add_dish`, null, {
-      params: newDish,
-    });
-    setNewDish({ name: "", type_id: "" });
-    fetchDishes();
-  };
-
-  const handleAddDishType = async () => {
-    await axios.post(`${API_URL}/add_dish_type`, null, {
-      params: { name: newDishType },
-    });
-    setNewDishType("");
-    fetchDishTypes();
-  };
-
-  const handleLinkIngredient = async () => {
-    await axios.post(`${API_URL}/link_ingredient`, null, {
-      params: ingredientLink,
-    });
-    setIngredientLink({ dish_id: "", ingredient_id: "", quantity_required: "" });
-    fetchDishIngredients();
-  };
-
   const handleDelete = async (id) => {
   if (!window.confirm("Are you sure you want to delete this item?")) return;
 
@@ -389,17 +392,50 @@ export default function InventoryApp() {
   };
 
 
-  return (
+
+ return (
    <div
       className="p-4 space-y-6 min-h-screen bg-cover bg-center"
       style={{
         backgroundImage: "url('/logo.png')",
-        backgroundColor: "#808080"
+        backgroundColor: "#808080",
       }}
     >
-    <div className="flex justify-center">
-      <img src="/vibes-logo.png" alt="Logo" className="h-26 mb-4" />
-    </div>
+
+      {/* Logo */}
+      <div className="flex justify-center">
+        <img src="/vibes-logo.png" alt="Logo" className="h-24 mb-4" />
+      </div>
+
+      {/* Grid Layout */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 px-4">
+        {/* Sidebar */}
+        <div className="col-span-1 space-y-2">
+          <Card
+            onClick={() => setActiveTab("inventory")}
+            className={`cursor-pointer ${activeTab === "inventory" ? "bg-gray-100" : ""}`}
+          >
+            <CardContent className="p-4 font-semibold">📦 Inventory</CardContent>
+          </Card>
+          <Card
+            onClick={() => setActiveTab("dishes")}
+            className={`cursor-pointer ${activeTab === "dishes" ? "bg-gray-100" : ""}`}
+          >
+            <CardContent className="p-4 font-semibold">🍽️ Dishes</CardContent>
+          </Card>
+          <Card
+            onClick={() => setActiveTab("remaining")}
+            className={`cursor-pointer ${activeTab === "remaining" ? "bg-gray-100" : ""}`}
+          >
+            <CardContent className="p-4 font-semibold">📊 Inventory Remaining</CardContent>
+          </Card>
+        </div>
+      </div>
+
+      <div className="w-full md:w-3/4 space-y-4">
+          {activeTab === "inventory" && (
+            <>
+
        <Card className="bg-gradient-to-br from-yellow-200 to-white shadow-lg rounded-lg">
         <CardContent className="space-y-2">
           <h2 className="text-xl font-bold">Add Inventory Item</h2>
@@ -771,10 +807,89 @@ export default function InventoryApp() {
           )}
         </CardContent>
       </Card>
+     </>
+    )}
 
+    {activeTab === "dishes" && (
+  <>
+    <Card className="max-w-xl mx-auto mt-10 p-6 shadow-xl">
+      <h2 className="text-xl font-bold mb-4">Add New Dish</h2>
+      <form onSubmit={handleAddDish} className="space-y-4">
+        <div>
+          <Label>Dish Name</Label>
+          <Input
+            value={dishName}
+            onChange={(e) => setDishName(e.target.value)}
+            required
+          />
+        </div>
+        <div>
+          <Label>Dish Type</Label>
+          <Input
+            value={dishType}
+            onChange={(e) => setDishType(e.target.value)}
+            required
+          />
+        </div>
 
+        <div>
+          <Label className="block mb-2">Ingredients</Label>
+          {ingredients.map((ing, idx) => (
+            <div key={idx} className="flex items-center gap-2 mb-2">
+              <Input
+                placeholder="Name"
+                value={ing.name}
+                onChange={(e) => handleIngredientChange(idx, "name", e.target.value)}
+                required
+              />
+              <Input
+                placeholder="Quantity"
+                type="number"
+                step="0.01"
+                value={ing.quantity}
+                onChange={(e) => handleIngredientChange(idx, "quantity", e.target.value)}
+                required
+              />
+              {ingredients.length > 1 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => removeIngredient(idx)}
+                >
+                  <X size={16} />
+                </Button>
+              )}
+            </div>
+          ))}
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="mt-2"
+            onClick={addIngredient}
+          >
+            <Plus size={16} className="mr-1" /> Add Ingredient
+          </Button>
+        </div>
 
+        <Button type="submit" className="w-full mt-4">
+          Submit
+        </Button>
+      </form>
+    </Card>
 
+    {/* 👇 This needs to be inside the fragment */}
+    <DishList dishes={dishes} />
+  </>
+)}
+
+          {activeTab === "remaining" && (
+            <Card className="p-4">
+              <h2 className="text-xl font-bold">📊 Inventory Remaining Stats</h2>
+            </Card>
+          )}
+
+    </div>
 
     </div>
   );
