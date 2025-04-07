@@ -39,6 +39,7 @@ export default function InventoryApp() {
   const [showUpdateForm, setShowUpdateForm] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
   const [selectedInventoryName, setSelectedInventoryName] = useState("");
+  const [selectedInventoryType, setSelectedInventoryType] = useState("");
   const unitOptions = ["kg", "gm", "litre", "ml", "piece", "pack", "bottle", "single"];
   const [activeTab, setActiveTab] = useState<"inventory" | "dishes" | "remaining">("inventory");
   const [showInventory, setShowInventory] = useState(false);
@@ -334,6 +335,7 @@ export default function InventoryApp() {
       if (reportRange.start) params.start_date = reportRange.start;
       if (reportRange.end) params.end_date = reportRange.end;
       if (selectedInventoryName) params.inventory_name = selectedInventoryName;
+      if (selectedInventoryType) params.type = selectedInventoryType;
       const res = await axios.get(`${API_URL}/expense_report`, { params });
 
       setReport(res.data);
@@ -785,23 +787,34 @@ export default function InventoryApp() {
             value={selectedInventoryName}
             onChange={(e) => setSelectedInventoryName(e.target.value)}
           />
+           <Label className="mt-2">Inventory Type (Optional)</Label>
+          <Input
+            type="text"
+            className="w-50 border rounded px-2 py-1"
+            placeholder="Enter item type"
+            value={selectedInventoryType}
+            onChange={(e) => setSelectedInventoryType(e.target.value)}
+          />
           <Button className="mt-2" onClick={handleExpenseReport}>Get Report</Button>
           {report && (
             <div className="mt-4 space-y-1">
             <p><strong>Inventory Name:</strong> {report.inventory_name}</p>
               <p><strong>Total Expense:</strong> {report.total_expense}</p>
               <p><strong>Average Expense:</strong> {report.average_expense}</p>
-              {selectedInventoryName ? (
+              {(selectedInventoryName || selectedInventoryType) ? (
                 <>
                   <p><strong>Highest Expense:</strong> {report.highest_expense_day.amount}</p>
                   <p><strong>Lowest Expense:</strong> {report.lowest_expense_day.amount}</p>
                   <p><strong>Highest Expense Date:</strong> {report.highest_expense_day.date}</p>
                   <p><strong>Lowest Expense Date:</strong> {report.lowest_expense_day.date}</p>
+                  <p><strong>Highest Expense Inventory:</strong> {report.highest_expense_item}</p>
+                  <p><strong>Lowest Expense Inventory:</strong> {report.lowest_expense_item}</p>
+                  <p><strong>Most Frequently bought Inventory:</strong> {report.most_frequent_inventory}</p>
                 </>
               ) : (
       <>
-        {/* Render alternative report when no inventory is selected */}
-        <p className="text-gray-500">No specific inventory selected.</p>
+        {/* Render alternative report when no inventory or type is selected */}
+        <p className="text-gray-500">No specific inventory or type selected.</p>
         <p><strong>Highest Expense Date:</strong> {report.highest_expense_day.date}</p>
         <p><strong>Lowest Expense Date:</strong> {report.lowest_expense_day.date}</p>
         <p><strong>Highest Expense Inventory:</strong> {report.highest_expense_item}</p>

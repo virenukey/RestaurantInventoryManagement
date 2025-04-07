@@ -322,6 +322,7 @@ def expense_report(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
     inventory_name: Optional[str] = Query(default=None),
+    type: Optional[str] = Query(default=None),
     db: Session = Depends(get_db)
 ):
     # Determine date range if not provided
@@ -353,8 +354,12 @@ def expense_report(
         Inventory.date_added <= end
     )
 
+    # Apply inventory_name filter if present
     if inventory_name:
         query = query.filter(Inventory.name.ilike(f"%{inventory_name}%"))
+    # Else apply type filter if present
+    elif type:
+        query = query.filter(Inventory.type.ilike(f"%{type}%"))
 
     inventory_items = query.all()
 
@@ -370,7 +375,7 @@ def expense_report(
             "most_frequent_inventory": None
         }
 
-    # Use total_cost directly (don't multiply by quantity again)
+    # Use total_cost directly
     total_expense = sum(item.total_cost for item in inventory_items)
     average_expense = total_expense / len(inventory_items)
 
@@ -386,6 +391,7 @@ def expense_report(
     lowest_expense_item = None
     most_frequent_inventory = None
 
+    # Apply extended analysis only if inventory_name is NOT provided
     if not inventory_name:
         highest_item = max(inventory_items, key=lambda x: x.total_cost, default=None)
         lowest_item = min(inventory_items, key=lambda x: x.total_cost, default=None)
@@ -397,6 +403,7 @@ def expense_report(
 
     return {
         "inventory_name": inventory_name,
+        "type": type if not inventory_name else None,
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
         "total_expense": total_expense,
@@ -413,7 +420,6 @@ def expense_report(
         "lowest_expense_item": lowest_expense_item,
         "most_frequent_inventory": most_frequent_inventory
     }
-
 
 @app.post("/upload_inventory_excel")
 async def upload_inventory_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
