@@ -798,28 +798,28 @@ export default function InventoryApp() {
           <Button className="mt-2" onClick={handleExpenseReport}>Get Report</Button>
           {report && (
             <div className="mt-4 space-y-1">
-            <p><strong>Inventory Name:</strong> {report.inventory_name}</p>
-              <p><strong>Total Expense:</strong> {report.total_expense}</p>
-              <p><strong>Average Expense:</strong> {report.average_expense}</p>
+            <p><strong>Inventory Name:</strong> {report.inventory_name ?? 'N/A'}</p>
+              <p><strong>Total Expense:</strong> {report.total_expense ?? 'N/A'}</p>
+              <p><strong>Average Expense:</strong> {report.average_expense ?? 'N/A'}</p>
               {(selectedInventoryName || selectedInventoryType) ? (
                 <>
-                  <p><strong>Highest Expense:</strong> {report.highest_expense_day.amount}</p>
-                  <p><strong>Lowest Expense:</strong> {report.lowest_expense_day.amount}</p>
-                  <p><strong>Highest Expense Date:</strong> {report.highest_expense_day.date}</p>
-                  <p><strong>Lowest Expense Date:</strong> {report.lowest_expense_day.date}</p>
-                  <p><strong>Highest Expense Inventory:</strong> {report.highest_expense_item}</p>
-                  <p><strong>Lowest Expense Inventory:</strong> {report.lowest_expense_item}</p>
-                  <p><strong>Most Frequently bought Inventory:</strong> {report.most_frequent_inventory}</p>
+                  <p><strong>Highest Expense:</strong> {report.highest_expense_day?.amount ?? 'N/A'}</p>
+                  <p><strong>Lowest Expense:</strong> {report.lowest_expense_day?.amount ?? 'N/A'}</p>
+                  <p><strong>Highest Expense Date:</strong> {report.highest_expense_day?.date ?? 'N/A'}</p>
+                  <p><strong>Lowest Expense Date:</strong> {report.lowest_expense_day?.date ?? 'N/A'}</p>
+                  <p><strong>Highest Expense Inventory:</strong> {report.highest_expense_item ?? 'N/A'}</p>
+                  <p><strong>Lowest Expense Inventory:</strong> {report.lowest_expense_item ?? 'N/A'}</p>
+                  <p><strong>Most Frequently bought Inventory:</strong> {report.most_frequent_inventory ?? 'N/A'}</p>
                 </>
               ) : (
       <>
         {/* Render alternative report when no inventory or type is selected */}
         <p className="text-gray-500">No specific inventory or type selected.</p>
-        <p><strong>Highest Expense Date:</strong> {report.highest_expense_day.date}</p>
-        <p><strong>Lowest Expense Date:</strong> {report.lowest_expense_day.date}</p>
-        <p><strong>Highest Expense Inventory:</strong> {report.highest_expense_item}</p>
-        <p><strong>Lowest Expense Inventory:</strong> {report.lowest_expense_item}</p>
-        <p><strong>Most Frequently bought Inventory:</strong> {report.most_frequent_inventory}</p>
+        <p><strong>Highest Expense Date:</strong> {report.highest_expense_day?.date ?? 'N/A'}</p>
+        <p><strong>Lowest Expense Date:</strong> {report.lowest_expense_day?.date ?? 'N/A'}</p>
+        <p><strong>Highest Expense Inventory:</strong> {report.highest_expense_item ?? 'N/A'}</p>
+        <p><strong>Lowest Expense Inventory:</strong> {report.lowest_expense_item ?? 'N/A'}</p>
+        <p><strong>Most Frequently bought Inventory:</strong> {report.most_frequent_inventory ?? 'N/A'}</p>
         {/* Add more fields as needed */}
       </>
               )}
