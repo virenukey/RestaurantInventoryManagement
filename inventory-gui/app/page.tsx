@@ -802,8 +802,11 @@ export default function InventoryApp() {
       <>
         {/* Render alternative report when no inventory is selected */}
         <p className="text-gray-500">No specific inventory selected.</p>
-        <p><strong>Highest Expense Inventory:</strong> {report.highest_expense}</p>
-        <p><strong>Overall Lowest Expense:</strong> {report.lowest_expense}</p>
+        <p><strong>Highest Expense Date:</strong> {report.highest_expense_day.date}</p>
+        <p><strong>Lowest Expense Date:</strong> {report.lowest_expense_day.date}</p>
+        <p><strong>Highest Expense Inventory:</strong> {report.highest_expense_item}</p>
+        <p><strong>Lowest Expense Inventory:</strong> {report.lowest_expense_item}</p>
+        <p><strong>Most Frequently bought Inventory:</strong> {report.most_frequent_inventory}</p>
         {/* Add more fields as needed */}
       </>
               )}

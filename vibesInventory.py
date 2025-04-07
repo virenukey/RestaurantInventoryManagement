@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
-from collections import defaultdict
+from collections import defaultdict, Counter
 from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
 from io import BytesIO
@@ -327,16 +327,19 @@ def expense_report(
     # Determine date range if not provided
     if not start_date or not end_date:
         date_range = db.query(
-            func.min(Expense.date),
-            func.max(Expense.date)
+            func.min(Inventory.date_added),
+            func.max(Inventory.date_added)
         ).first()
         if not date_range or not date_range[0] or not date_range[1]:
             return {
-                "message": "No expenses in the database.",
+                "message": "No inventory records in the database.",
                 "total_expense": 0,
                 "average_expense": 0,
                 "highest_expense_day": None,
                 "lowest_expense_day": None,
+                "highest_expense_item": None,
+                "lowest_expense_item": None,
+                "most_frequent_inventory": None
             }
         start = date_range[0]
         end = date_range[1]
@@ -344,49 +347,53 @@ def expense_report(
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
 
-    # Base query with date range
-    query = db.query(Expense).filter(Expense.date >= start, Expense.date <= end)
+    # Base query
+    query = db.query(Inventory).filter(
+        Inventory.date_added >= start,
+        Inventory.date_added <= end
+    )
 
-    # Optional case-insensitive filter by inventory name
     if inventory_name:
-        query = query.filter(Expense.item_name.ilike(f"%{inventory_name}%"))
-    else:
-        start = datetime.strptime(start_date, "%Y-%m-%d")
-        end = datetime.strptime(end_date, "%Y-%m-%d")
-        expenses = db.query(Expense).filter(Expense.date >= start, Expense.date <= end).all()
-        total = sum(exp.total_cost for exp in expenses)
-        avg = total / len(expenses) if expenses else 0
-        highest = max(expenses, key=lambda x: x.total_cost, default=None)
-        lowest = min(expenses, key=lambda x: x.total_cost, default=None)
-        return {
-            "total_expense": total,
-            "average_expense": avg,
-            "highest_expense": highest.item_name if highest else None,
-            "lowest_expense": lowest.item_name if lowest else None
-        }
+        query = query.filter(Inventory.name.ilike(f"%{inventory_name}%"))
 
-    expenses = query.all()
+    inventory_items = query.all()
 
-    if not expenses:
+    if not inventory_items:
         return {
-            "message": "No expenses found for the given filters.",
+            "message": "No inventory found for the given filters.",
             "total_expense": 0,
             "average_expense": 0,
             "highest_expense_day": None,
             "lowest_expense_day": None,
+            "highest_expense_item": None,
+            "lowest_expense_item": None,
+            "most_frequent_inventory": None
         }
 
-    # Group by date
-    daily_expenses = defaultdict(float)
-    for exp in expenses:
-        daily_expenses[exp.date.date()] += exp.total_cost
+    # Use total_cost directly (don't multiply by quantity again)
+    total_expense = sum(item.total_cost for item in inventory_items)
+    average_expense = total_expense / len(inventory_items)
 
-    # Aggregate stats
-    total_expense = sum(exp.total_cost for exp in expenses)
-    average_expense = total_expense / len(expenses)
+    # Daily totals
+    daily_expenses = defaultdict(float)
+    for item in inventory_items:
+        daily_expenses[item.date_added.date()] += item.total_cost
 
     highest_day = max(daily_expenses.items(), key=lambda x: x[1])
     lowest_day = min(daily_expenses.items(), key=lambda x: x[1])
+
+    highest_expense_item = None
+    lowest_expense_item = None
+    most_frequent_inventory = None
+
+    if not inventory_name:
+        highest_item = max(inventory_items, key=lambda x: x.total_cost, default=None)
+        lowest_item = min(inventory_items, key=lambda x: x.total_cost, default=None)
+        highest_expense_item = highest_item.name if highest_item else None
+        lowest_expense_item = lowest_item.name if lowest_item else None
+
+        item_counts = Counter(item.name for item in inventory_items)
+        most_frequent_inventory = item_counts.most_common(1)[0][0] if item_counts else None
 
     return {
         "inventory_name": inventory_name,
@@ -401,7 +408,10 @@ def expense_report(
         "lowest_expense_day": {
             "date": lowest_day[0].isoformat(),
             "amount": lowest_day[1]
-        }
+        },
+        "highest_expense_item": highest_expense_item,
+        "lowest_expense_item": lowest_expense_item,
+        "most_frequent_inventory": most_frequent_inventory
     }
 
 
