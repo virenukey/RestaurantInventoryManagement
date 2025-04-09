@@ -398,7 +398,6 @@ export default function InventoryApp() {
   };
 
 
-
  return (
    <div
       className="p-4 space-y-6 min-h-screen bg-cover bg-center"

@@ -518,6 +518,86 @@ async def upload_inventory_excel(file: UploadFile = File(...), db: Session = Dep
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+@app.post("/upload_dish_excel")
+async def upload_dish_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Please upload a valid Excel file (.xlsx or .xls)")
+
+    try:
+        contents = await file.read()
+        workbook = load_workbook(filename=BytesIO(contents))
+        sheet = workbook.active
+
+        headers = [str(cell.value).strip() if cell.value else "" for cell in sheet[1]]
+        required_columns = {"name", "type", "ingredient_name", "quantity_required"}
+
+        missing_required = required_columns - set(headers)
+        if missing_required:
+            return JSONResponse(status_code=400, content={
+                "error": f"Missing required columns: {', '.join(missing_required)}. Found: {headers}"
+            })
+
+        col_index = {key: headers.index(key) for key in required_columns}
+
+        dishes_map = {}  # Temporary cache to hold dishes before commit
+        added_dishes = []
+        skipped_rows = []
+
+        for idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            try:
+                if not row or all(cell is None for cell in row):
+                    continue  # Skip empty rows
+
+                dish_name = str(row[col_index["name"]]).strip()
+                dish_type = str(row[col_index["type"]]).strip()
+                ingredient_name = str(row[col_index["ingredient_name"]]).strip()
+                quantity_required = float(row[col_index["quantity_required"]])
+
+                # Fetch or create DishType
+                dish_type_obj = db.query(DishType).filter_by(name=dish_type).first()
+                if not dish_type_obj:
+                    dish_type_obj = DishType(name=dish_type)
+                    db.add(dish_type_obj)
+                    db.flush()  # To assign an ID
+
+                # Unique key for dish mapping
+                dish_key = (dish_name, dish_type_obj.id)
+                if dish_key not in dishes_map:
+                    dish = db.query(Dish).filter_by(name=dish_name, type_id=dish_type_obj.id).first()
+                    if not dish:
+                        dish = Dish(name=dish_name, type_id=dish_type_obj.id)
+                        db.add(dish)
+                        db.flush()  # Assign ID
+                        added_dishes.append(dish_name)
+                    dishes_map[dish_key] = dish
+                else:
+                    dish = dishes_map[dish_key]
+
+                # Add ingredient
+                dish_ingredient = DishIngredient(
+                    dish_id=dish.id,
+                    ingredient_name=ingredient_name,
+                    quantity_required=quantity_required
+                )
+                db.add(dish_ingredient)
+
+            except Exception as row_error:
+                skipped_rows.append(f"Row {idx}: {str(row_error)}")
+
+        db.commit()
+
+        return {
+            "message": "Dishes uploaded successfully",
+            "added_dishes": list(set(added_dishes)),
+            "skipped_rows": skipped_rows
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
 @app.post("/add_dish")
 def add_dish(request: AddDishRequest, db: Session = Depends(get_db)):
     # Check if dish with same name exists

@@ -7,6 +7,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import axios from "axios";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface Ingredient {
   ingredient_name: string;
@@ -30,6 +32,10 @@ const DishList: React.FC = () => {
   const [editedName, setEditedName] = useState("");
   const [editedType, setEditedType] = useState("");
   const [editedIngredients, setEditedIngredients] = useState<Ingredient[]>([]);
+
+  const [file, setFile] = useState<File | null>(null);
+  const [status, setStatus] = useState<string>("");
+  const [details, setDetails] = useState<any>(null);
 
   useEffect(() => {
     fetchDishes();
@@ -140,8 +146,67 @@ const DishList: React.FC = () => {
     setEditedIngredients(editedIngredients.filter((_, i) => i !== index));
   };
 
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setFile(e.target.files[0]);
+    }
+  };
+
+  const handleExcelUpload = async () => {
+    if (!file) return;
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const response = await axios.post("http://localhost:8000/upload_dish_excel", formData, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
+
+      alert(response.data.message || "Dishes uploaded successfully!");
+      setDetails(response.data);
+      setStatus("Upload complete");
+      fetchDishes();
+    } catch (error: any) {
+      console.error("Upload failed:", error);
+      alert(error.response?.data?.detail || "Failed to upload Excel.");
+    }
+  };
+
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
+      <Card className="w-full max-w-xl mx-auto">
+        <CardHeader>
+          <CardTitle>📦 Upload dish Excel</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Input type="file" accept=".xlsx,.xls" onChange={handleChange} />
+          <Button onClick={handleExcelUpload} disabled={!file}>
+            Upload
+          </Button>
+          {status && <p className="text-sm text-gray-700">{status}</p>}
+          {details && (
+            <div className="text-sm bg-gray-50 p-3 rounded border space-y-2">
+              <div>
+                <strong>✅ Added:</strong>{" "}
+                {details.added_dishes?.length > 0 ? details.added_dishes.join(", ") : "None"}
+              </div>
+              {details.skipped_rows?.length > 0 && (
+                <div>
+                  <strong>⚠️ Skipped Rows:</strong>
+                  <ul className="list-disc pl-5">
+                    {details.skipped_rows.map((row: string, idx: number) => (
+                      <li key={idx}>{row}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-600" />
         <Input
