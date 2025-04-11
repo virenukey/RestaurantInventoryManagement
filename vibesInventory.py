@@ -161,6 +161,7 @@ def add_item(
 @app.get("/search_inventory")
 def search_inventory(
     name: Optional[str] = Query(None, description="Partial or full item name"),
+    type: Optional[str] = Query(None, description="Inventory type (e.g. 'Vegetables', 'Dairy')"),
     start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
     end_date: Optional[str] = Query(None, description="End date in YYYY-MM-DD format"),
     db: Session = Depends(get_db)
@@ -170,6 +171,8 @@ def search_inventory(
 
         if name:
             query = query.filter(Inventory.name.ilike(f"%{name}%"))
+        elif type:
+            query = query.filter(Inventory.type.ilike(f"%{type}%"))
 
         if start_date:
             try:

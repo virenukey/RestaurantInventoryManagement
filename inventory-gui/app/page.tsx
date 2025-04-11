@@ -200,6 +200,7 @@ export default function InventoryApp() {
     const res = await axios.get(`${API_URL}/search_inventory`, {
       params: {
         name: searchParams.name || undefined,
+        type: searchParams.type || undefined,
         start_date: searchParams.start_date || undefined,
         end_date: searchParams.end_date || undefined,
       },
@@ -302,6 +303,7 @@ export default function InventoryApp() {
     const res = await axios.get(`${API_URL}/search_inventory`, {
       params: {
         name: searchParams.name || undefined,
+        type: searchParams.type || undefined,
         start_date: searchParams.start_date || undefined,
         end_date: searchParams.end_date || undefined,
       },
@@ -549,6 +551,14 @@ export default function InventoryApp() {
           className="w-50 border rounded px-2 py-1"
           value={searchParams.name}
           onChange={(e) => setSearchParams({ ...searchParams, name: e.target.value })}
+        />
+      </div>
+      <div>
+        <Label>Type</Label>
+        <Input
+          className="w-50 border rounded px-2 py-1"
+          value={searchParams.type}
+          onChange={(e) => setSearchParams({ ...searchParams, type: e.target.value })}
         />
       </div>
       <div>
@@ -873,7 +883,7 @@ export default function InventoryApp() {
                 placeholder="Quantity"
                 type="number"
                 step="0.01"
-                value={ing.quantity}
+                value={ing.quantity ?? ""}
                 onChange={(e) => handleIngredientChange(idx, "quantity", e.target.value)}
                 required
               />
