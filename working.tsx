@@ -904,6 +904,8 @@ export default function InventoryApp() {
   </>
 )}
 
+
+
           {activeTab === "remaining" && (
             <Card className="p-4">
               <h2 className="text-xl font-bold">📊 Inventory Remaining Stats</h2>
@@ -912,13 +914,27 @@ export default function InventoryApp() {
           <h2 className="text-xl font-bold">Inventory On Date</h2>
           <Input className="w-50 border rounded px-2 py-1" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           <Button onClick={handleInventoryOnDate}>Fetch</Button>
-          <ul>
-            {dateInventory.map((log, index) => (
-              <li key={index}>
-                Inventory: {log.inventory_name}, Quantity Left: {log.quantity_left}, Date: {log.log_time}
-              </li>
-            ))}
-          </ul>
+         <table className="min-w-full table-auto mt-4 border border-gray-300">
+  <thead className="bg-gray-100">
+    <tr>
+      <th className="border px-4 py-2 text-left">Ingredient</th>
+      <th className="border px-4 py-2 text-left">Quantity Left</th>
+      <th className="border px-4 py-2 text-left">Unit</th>
+      <th className="border px-4 py-2 text-left">Log Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    {dateInventory.map((log, index) => (
+      <tr key={index} className="hover:bg-yellow-50">
+        <td className="border px-4 py-2">{log.inventory_name}</td>
+        <td className="border px-4 py-2">{log.quantity_left}</td>
+        <td className="border px-4 py-2">{log.unit}</td>
+        <td className="border px-4 py-2">{log.log_time}</td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
         </CardContent>
       </Card>
             </Card>

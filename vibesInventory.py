@@ -892,7 +892,7 @@ def prepare_dish(
             ))
 
             usage_summary.append({
-                "ingredient": ingredient.ingredient_name,
+                "inventory_name": ingredient.ingredient_name,
                 "inventory_batch_id": batch.id,
                 "used_from_batch": deduct_qty,
                 "remaining_in_batch": batch.quantity,
