@@ -1,8 +1,8 @@
 from fastapi import FastAPI, HTTPException, Depends, Query, UploadFile, File, HTTPException
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, func
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, func, desc, and_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
 from collections import defaultdict, Counter
@@ -115,6 +115,11 @@ class DishUpdate(BaseModel):
     type: Optional[str] = None
     ingredients: Optional[List[DishIngredientUpdate]] = None
 
+class PrepareDishRequest(BaseModel):
+    dish_name: str
+    quantity: float
+    date: Optional[str] = None  # format: YYYY-MM-DD
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -161,6 +166,7 @@ def add_item(
 @app.get("/search_inventory")
 def search_inventory(
     name: Optional[str] = Query(None, description="Partial or full item name"),
+    type: Optional[str] = Query(None, description="Inventory type (e.g. 'Vegetables', 'Dairy')"),
     start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
     end_date: Optional[str] = Query(None, description="End date in YYYY-MM-DD format"),
     db: Session = Depends(get_db)
@@ -170,6 +176,8 @@ def search_inventory(
 
         if name:
             query = query.filter(Inventory.name.ilike(f"%{name}%"))
+        elif type:
+            query = query.filter(Inventory.type.ilike(f"%{type}%"))
 
         if start_date:
             try:
@@ -795,56 +803,175 @@ def update_dish(dish_id: int, payload: DishUpdate, db: Session = Depends(get_db)
 
 
 @app.post("/prepare_dish")
-def prepare_dish(dish_id: int, quantity: float, db: Session = Depends(get_db)):
-    dish_ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish_id).all()
+def prepare_dish(
+    request: PrepareDishRequest,
+    db: Session = Depends(get_db)
+):
+    # Parse the preparation date (or default to now)
+    if request.date:
+        try:
+            prepare_date = datetime.strptime(request.date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    else:
+        prepare_date = datetime.utcnow()
 
+    dish = db.query(Dish).filter(Dish.name.ilike(request.dish_name.strip())).first()
+    if not dish:
+        raise HTTPException(status_code=404, detail=f"Dish '{request.dish_name}' not found")
+
+    dish_ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
     if not dish_ingredients:
-        raise HTTPException(status_code=404, detail="Dish not found or has no ingredients")
+        raise HTTPException(status_code=400, detail=f"No ingredients found for dish '{request.dish_name}'")
+
+    usage_summary = []
 
     for ingredient in dish_ingredients:
-        required_qty = ingredient.quantity_required * quantity
+        required_qty = ingredient.quantity_required * request.quantity
 
-        # Fetch all inventory batches for this ingredient, ordered by date_added (FIFO)
         inventory_batches = db.query(Inventory).filter(
-            Inventory.name == ingredient.ingredient.name,  # Assuming FK to InventoryItem with `name`
+            Inventory.name.ilike(ingredient.ingredient_name),
             Inventory.quantity > 0
         ).order_by(Inventory.date_added.asc()).all()
 
         if not inventory_batches:
-            raise HTTPException(status_code=400, detail=f"No inventory available for {ingredient.ingredient.name}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"No inventory available for {ingredient.ingredient_name}"
+            )
 
-        # Deduct from batches in FIFO order
         for batch in inventory_batches:
             if required_qty <= 0:
                 break
 
-            deduct_qty = min(batch.quantity, required_qty)
-            batch.quantity -= deduct_qty
+            unit = batch.unit.strip().lower()
+            batch_qty_in_base = batch.quantity
+
+            # Convert to base unit (g, ml, pieces)
+            if unit == "kg":
+                batch_qty_in_base *= 1000
+            elif unit in ["g", "gm", "grams"]:
+                pass
+            elif unit in ["liter", "litre", "l"]:
+                batch_qty_in_base *= 1000
+            elif unit == "ml":
+                pass
+            elif unit in ["piece", "pieces", "pc", "pcs", "pack", "packs"]:
+                pass
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported unit '{batch.unit}' for ingredient '{batch.name}'")
+
+            deduct_qty = min(batch_qty_in_base, required_qty)
+            remaining_qty_in_base = batch_qty_in_base - deduct_qty
             required_qty -= deduct_qty
 
+            # Convert back to original unit
+            if unit == "kg":
+                batch.quantity = remaining_qty_in_base / 1000
+            elif unit in ["g", "gm", "grams"]:
+                batch.quantity = remaining_qty_in_base
+            elif unit in ["liter", "litre", "l"]:
+                batch.quantity = remaining_qty_in_base / 1000
+            elif unit == "ml":
+                batch.quantity = remaining_qty_in_base
+            elif unit in ["piece", "pieces", "pc", "pcs", "pack", "packs"]:
+                batch.quantity = remaining_qty_in_base
+
             db.add(batch)
-            db.add(InventoryLog(
+
+            # Insert log at specified date
+            log_entry = InventoryLog(
                 ingredient_id=batch.id,
                 quantity_left=batch.quantity,
-                date=datetime.utcnow()
-            ))
+                date=prepare_date
+            )
+            db.add(log_entry)
+
+            usage_summary.append({
+                "ingredient": ingredient.ingredient_name,
+                "inventory_batch_id": batch.id,
+                "used_from_batch": deduct_qty,
+                "remaining_in_batch": batch.quantity,
+                "unit": unit,
+                "logged_at": prepare_date.strftime("%Y-%m-%d")
+            })
+
+            # Update all future logs
+            future_logs = db.query(InventoryLog).filter(
+                and_(
+                    InventoryLog.ingredient_id == batch.id,
+                    InventoryLog.date > prepare_date
+                )
+            ).order_by(InventoryLog.date.asc()).all()
+
+            current_quantity = batch.quantity
+
+            for log in future_logs:
+                log.quantity_left = current_quantity
+                db.add(log)
+
+            # ✅ Update Inventory table based on the latest log
+            latest_log = db.query(InventoryLog).filter(
+                InventoryLog.ingredient_id == batch.id
+            ).order_by(InventoryLog.date.desc()).first()
+
+            if latest_log:
+                inventory_entry = db.query(Inventory).filter(Inventory.id == batch.id).first()
+                if inventory_entry:
+                    inventory_entry.quantity = latest_log.quantity_left
+                    db.add(inventory_entry)
 
         if required_qty > 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Not enough {ingredient.ingredient.name} in inventory to prepare {quantity} servings"
+                detail=f"Not enough '{ingredient.ingredient_name}' in inventory to prepare {request.quantity} servings. Short by {required_qty:.2f} units."
             )
 
     db.commit()
-    return {"message": "Dish prepared using FIFO inventory. Inventory updated!"}
 
+    return {
+        "message": f"Dish '{dish.name}' prepared successfully for {request.quantity} servings on {prepare_date.date()}.",
+        "usage_summary": usage_summary
+    }
 
 
 @app.get("/inventory_on_date")
 def inventory_on_date(date: str, db: Session = Depends(get_db)):
-    date_parsed = datetime.strptime(date, "%Y-%m-%d")
-    items = db.query(InventoryLog).filter(InventoryLog.date == date_parsed).all()
-    return [{"ingredient_id": item.ingredient_id, "quantity_left": item.quantity_left, "date": item.date} for item in items]
+    try:
+        date_parsed = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    next_day = date_parsed + timedelta(days=1)
+
+    # Get all logs for the day
+    logs = db.query(InventoryLog).filter(
+        InventoryLog.date >= date_parsed,
+        InventoryLog.date < next_day
+    ).order_by(InventoryLog.ingredient_id, desc(InventoryLog.date)).all()
+
+    # Track the latest log per ingredient_id
+    latest_log_map = {}
+    for log in logs:
+        if log.ingredient_id not in latest_log_map:
+            latest_log_map[log.ingredient_id] = log  # first (latest) log due to descending sort
+
+    # Convert to list for response
+    response = []
+    for log in latest_log_map.values():
+        # Optional: join with inventory to get ingredient name
+        inventory_item = db.query(Inventory).filter(Inventory.id == log.ingredient_id).first()
+        response.append({
+            "ingredient_id": log.ingredient_id,
+            "inventory_name": inventory_item.name if inventory_item else "Unknown",
+            "unit": inventory_item.unit if inventory_item else "",
+            "quantity_left": log.quantity_left,
+            "log_time": log.date.strftime("%Y-%m-%d %H:%M:%S")
+        })
+
+    return response
+
+
 
 
 

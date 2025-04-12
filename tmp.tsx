@@ -1,23 +1,14 @@
-const updatedItem = {
-    name: updatedName,
-    quantity: parseFloat(updatedQuantity),
-    unit: updatedUnit,
-    price_per_unit: parseFloat(updatedPrice),
-  };
-
-  try {
-    const response = await fetch(`http://localhost:8000/update_item/${item.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updatedItem),
-    });
-
-    const data = await response.json();
-    alert(data.message);
-    fetchInventory(); // refresh list
-  } catch (error) {
-    alert("Failed to update item");
-  }
-};
-
-<button className="bg-yellow-500 text-white px-2 py-1 rounded mr-2" onClick={() => handleUpdate(item)}>Update</button>
+      <Card className="bg-gradient-to-br from-yellow-200 to-white shadow-lg rounded-lg">
+        <CardContent>
+          <h2 className="text-xl font-bold">Inventory On Date</h2>
+          <Input className="w-50 border rounded px-2 py-1" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+          <Button onClick={handleInventoryOnDate}>Fetch</Button>
+          <ul>
+            {dateInventory.map((log, index) => (
+              <li key={index}>
+                Ingredient ID: {log.ingredient_id}, Quantity Left: {log.quantity_left}, Date: {log.date}
+              </li>
+            ))}
+          </ul>
+        </CardContent>
+      </Card>
