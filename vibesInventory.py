@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Query, UploadFile, File, HT
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, func, desc, and_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
 from collections import defaultdict, Counter
@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
 from io import BytesIO
 from pydantic import BaseModel
+from dateutil import parser
 
 
 DATABASE_URL = "sqlite:///./inventory.db"
@@ -941,6 +942,65 @@ def prepare_dish(
         "message": f"Dish '{dish.name}' prepared successfully for {quantity} servings on {prepare_date.date()}.",
         "usage_summary": usage_summary
     }
+
+
+@app.post("/upload_prepare_dish_excel")
+async def upload_prepare_dish_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a .xlsx or .xls file.")
+
+    try:
+        contents = await file.read()
+        workbook = load_workbook(filename=BytesIO(contents))
+        sheet = workbook.active
+
+        headers = [str(cell.value).strip().lower() if cell.value else "" for cell in sheet[1]]
+        required_columns = {"dish_name", "quantity", "date"}
+        col_index = {h: i for i, h in enumerate(headers)}
+
+        missing = required_columns - set(col_index.keys())
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Missing required columns: {', '.join(missing)}")
+
+        success_count = 0
+        failed_rows = []
+
+        for idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            try:
+                dish_name = str(row[col_index["dish_name"]]).strip()
+                quantity = float(row[col_index["quantity"]])
+                #date_str = str(row[col_index["date"]]).strip()
+                date_str = row[col_index["date"]]
+                date = datetime.strptime(date_str, "%Y-%m-%d")
+
+                #date = parser.parse(date_str).date()
+                '''
+                date_raw = row[col_index["date"]]
+                if isinstance(date_raw, datetime):
+                    date = date_raw
+                elif isinstance(date_raw, str):
+                    date= datetime.strptime(date_raw.strip(), "%Y-%m-%d")
+                else:
+                    raise ValueError("Invalid date format in 'date_added'")
+                '''
+                # Call your existing dish preparation logic here
+                # This is a simplified version
+                response = prepare_dish(dish_name, quantity, date, db)
+                if response.get("success"):
+                    success_count += 1
+                else:
+                    failed_rows.append(f"Row {idx}: {response.get('error')}")
+
+            except Exception as e:
+                failed_rows.append(f"Row {idx}: {str(e)}")
+
+        return {
+            "message": f"Processed {success_count} row(s) successfully.",
+            "errors": failed_rows
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.get("/inventory_on_date")

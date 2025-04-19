@@ -13,9 +13,8 @@ export default function PrepareDishForm() {
   const [quantity, setQuantity] = useState("");
   const [date, setDate] = useState("");
   const [dishes, setDishes] = useState([]);
-  const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
 
+  // Fetch dish list on mount
   useEffect(() => {
     const fetchDishes = async () => {
       try {
@@ -40,7 +39,7 @@ export default function PrepareDishForm() {
         params: {
           dish_name: dishName,
           quantity: parseFloat(quantity),
-          date: date || undefined,
+          date: date || undefined, // optional
         },
       });
       toast.success(res.data.message || "Dish prepared successfully!");
@@ -54,46 +53,12 @@ export default function PrepareDishForm() {
     }
   };
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selected = e.target.files?.[0];
-    if (selected && (selected.name.endsWith(".xlsx") || selected.name.endsWith(".xls"))) {
-      setFile(selected);
-      setStatus(null);
-    } else {
-      setStatus("Please upload a valid Excel file (.xlsx or .xls)");
-    }
-  };
-
-  const handleUpload = async () => {
-    if (!file) {
-      setStatus("No file selected.");
-      return;
-    }
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      setStatus("Uploading...");
-      const res = await axios.post(`${API_URL}/upload_prepare_dish_excel`, formData, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-      });
-      toast.success("Upload successful!");
-      setStatus("Upload successful!");
-    } catch (err: any) {
-      const errorMsg = err.response?.data?.detail || "Upload failed.";
-      setStatus(`Error: ${errorMsg}`);
-      toast.error(errorMsg);
-    }
-  };
-
   return (
     <Card className="max-w-xl mx-auto mt-8 p-6 shadow-lg rounded-xl bg-white">
       <CardContent className="space-y-4">
         <h2 className="text-xl font-bold">🍽️ Prepare Dish</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
+
           <div>
             <Label>Dish Name</Label>
             <select
@@ -110,6 +75,7 @@ export default function PrepareDishForm() {
               ))}
             </select>
           </div>
+
           <div>
             <Label>Quantity (Servings)</Label>
             <Input
@@ -119,6 +85,7 @@ export default function PrepareDishForm() {
               required
             />
           </div>
+
           <div>
             <Label>Date (optional)</Label>
             <Input
@@ -127,17 +94,9 @@ export default function PrepareDishForm() {
               onChange={(e) => setDate(e.target.value)}
             />
           </div>
+
           <Button type="submit">Prepare</Button>
         </form>
-
-        <div className="mt-6 pt-4 border-t">
-          <h3 className="text-lg font-semibold mb-2">📁 Upload Prepare Dish Excel</h3>
-          <Input type="file" accept=".xlsx,.xls" onChange={handleChange} />
-          <Button className="mt-2" onClick={handleUpload} disabled={!file}>
-            Upload
-          </Button>
-          {status && <p className="text-sm mt-2 text-gray-700">{status}</p>}
-        </div>
       </CardContent>
     </Card>
   );
