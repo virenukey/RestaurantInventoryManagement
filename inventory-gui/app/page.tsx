@@ -46,6 +46,10 @@ export default function InventoryApp() {
   const [activeTab, setActiveTab] = useState<"inventory" | "dishes" | "remaining">("inventory");
   const [showInventory, setShowInventory] = useState(false);
 
+  const [openaiPrompt, setOpenaiPrompt] = useState(""); // OpenAI prompt input
+  const [openaiResponse, setOpenaiResponse] = useState(""); // Response from OpenAI
+
+
   const typeOptions = ["Oil", "Vegetables", "Spices", "Bun", "Pizza base", "Sauses", "Grains",
      "Dairy", "Non-Veg", "Maintanance", "Misc", "Grocery", "Cleaning", "Crockery", "Cutlery",
      "Beverages", "Tableware", "Linens", "Disposables", "Dry fruits", "Fruits", "Chocolates", "Bakery", "Cooking Gas"];
@@ -400,6 +404,23 @@ export default function InventoryApp() {
       setStatus(`Error: ${errorMsg}`);
     }
   };
+
+
+  const handleOpenaiQuery = async () => {
+  if (!openaiPrompt) {
+    alert("Please enter a prompt.");
+    return;
+  }
+
+  try {
+    const response = await axios.post(`${API_URL}/ask_openai`, { prompt: openaiPrompt });
+    setOpenaiResponse(response.data.response || "No response received.");
+  } catch (error) {
+    console.error("Error querying OpenAI:", error);
+    alert("Failed to get a response from AI.");
+  }
+};
+
 
 
  return (
@@ -825,6 +846,34 @@ export default function InventoryApp() {
           )}
         </CardContent>
       </Card>
+
+      <Card className="bg-gradient-to-br from-yellow-200 to-white shadow-lg rounded-lg">
+  <CardContent>
+    <h2 className="text-xl font-bold">🧠 Ask AI for Report</h2>
+
+    <Label>Enter your request</Label>
+    <Input
+      className="w-full border rounded px-2 py-1 mt-2"
+      type="text"
+      placeholder="e.g., Show total expense for April 2025"
+      value={openaiPrompt}
+      onChange={(e) => setOpenaiPrompt(e.target.value)}
+    />
+
+    <Button className="mt-2" onClick={handleOpenaiQuery}>
+      Submit to AI
+    </Button>
+
+    {openaiResponse && (
+      <div className="bg-gray-100 p-3 rounded mt-4">
+        <h3 className="font-semibold mb-2">AI Response:</h3>
+        <p>{openaiResponse}</p>
+      </div>
+    )}
+  </CardContent>
+</Card>
+
+
      </>
     )}
 

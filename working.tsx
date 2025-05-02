@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Plus, X } from "lucide-react";
 import DishList from "@/components/ui/DishList";
+import PrepareDishForm from "@/components/ui/PrepareDishForm"; // Adjust path if needed
+
 
 const API_URL = "http://localhost:8000";
 
@@ -429,6 +431,9 @@ export default function InventoryApp() {
             className={`cursor-pointer ${activeTab === "dishes" ? "bg-gray-100" : ""}`}
           >
             <CardContent className="p-4 font-semibold">🍽️ Dishes</CardContent>
+          </Card>
+          <Card onClick={() => setActiveTab("prepare")} className={`cursor-pointer ${activeTab === "prepare" ? "bg-gray-100" : ""}`}>
+            <CardContent className="p-4 font-semibold">👨‍🍳 Prepare Dish</CardContent>
           </Card>
           <Card
             onClick={() => setActiveTab("remaining")}
@@ -904,7 +909,9 @@ export default function InventoryApp() {
   </>
 )}
 
-
+{activeTab === "prepare" && (
+          <PrepareDishForm />
+        )}
 
           {activeTab === "remaining" && (
             <Card className="p-4">
@@ -917,7 +924,7 @@ export default function InventoryApp() {
          <table className="min-w-full table-auto mt-4 border border-gray-300">
   <thead className="bg-gray-100">
     <tr>
-      <th className="border px-4 py-2 text-left">Ingredient</th>
+      <th className="border px-4 py-2 text-left">Inventory</th>
       <th className="border px-4 py-2 text-left">Quantity Left</th>
       <th className="border px-4 py-2 text-left">Unit</th>
       <th className="border px-4 py-2 text-left">Log Time</th>
@@ -926,7 +933,7 @@ export default function InventoryApp() {
   <tbody>
     {dateInventory.map((log, index) => (
       <tr key={index} className="hover:bg-yellow-50">
-        <td className="border px-4 py-2">{log.inventory_name}</td>
+        <td className="border px-4 py-2">{log.ingredient_name}</td>
         <td className="border px-4 py-2">{log.quantity_left}</td>
         <td className="border px-4 py-2">{log.unit}</td>
         <td className="border px-4 py-2">{log.log_time}</td>

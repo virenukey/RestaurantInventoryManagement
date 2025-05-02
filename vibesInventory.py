@@ -11,8 +11,13 @@ from openpyxl import load_workbook
 from io import BytesIO
 from pydantic import BaseModel
 from dateutil import parser
+import openai
+import os
+#from your_existing_models import Inventory, Expense, Dish, DishIngredient, get_db
 
 
+# Ideally, set this as an environment variable in production
+openai.api_key = os.getenv("OPENAI_API_KEY", "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")
 DATABASE_URL = "sqlite:///./inventory.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -1036,7 +1041,62 @@ def inventory_on_date(date: str, db: Session = Depends(get_db)):
     return response
 
 
+class OpenAIPromptRequest(BaseModel):
+    prompt: str
 
+@app.post("/ask_openai")
+def ask_openai(request: OpenAIPromptRequest, db: Session = Depends(get_db)):
+    try:
+        prompt = request.prompt.strip()
+
+        # Limit Inventory and Expense records
+        #inventory_items = db.query(Inventory).order_by(Inventory.date_added.desc()).limit(50).all()
+        inventory_items = db.query(Inventory).order_by(Inventory.date_added.desc()).all()
+        #expenses = db.query(Expense).order_by(Expense.date.desc()).limit(50).all()
+
+        # Summarized Inventory Summary including Total Cost
+        inventory_summary = "\n".join(
+            [
+                f"{item.name} ({item.quantity} {item.unit}), Type: {item.type}, Total Cost: ₹{item.total_cost}"
+                for item in inventory_items
+            ]
+        )
+
+        '''
+        # Summarized Expense Summary
+        expense_summary = "\n".join(
+            [
+                f"{exp.item_name}: ₹{exp.total_cost} on {exp.date.date()}"
+                for exp in expenses
+            ]
+        )
+        '''
+
+        # System prompt
+        system_prompt = (
+            "You are an expert restaurant Inventory and Expense report generator."
+            " Use the provided data below to answer the user's specific question or create a report."
+            "\n\nInventory Data (latest 50 items):\n" + inventory_summary
+        )
+
+        # OpenAI Request
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo-1106",  # or gpt-4-1106-preview if you have access
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=1500,   # Safe
+        )
+
+        ai_message = response['choices'][0]['message']['content']
+        return {"response": ai_message}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"OpenAI Error: {str(e)}")
 
 
 if __name__ == "__main__":
