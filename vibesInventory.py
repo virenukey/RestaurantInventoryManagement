@@ -17,7 +17,7 @@ import os
 
 
 # Ideally, set this as an environment variable in production
-openai.api_key = os.getenv("OPENAI_API_KEY", "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")
+#openai.api_key = os.getenv("OPENAI_API_KEY", "")
 DATABASE_URL = "sqlite:///./inventory.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
