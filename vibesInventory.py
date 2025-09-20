@@ -35,9 +35,11 @@ if DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
     engine = create_engine(DATABASE_URL)
+    print("Using PostgreSQL database")
 else:
     # SQLite for local development
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    print("Using SQLite database")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
