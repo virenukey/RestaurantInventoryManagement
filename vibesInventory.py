@@ -1502,6 +1502,13 @@ def ask_openai(request: OpenAIPromptRequest, db: Session = Depends(get_db)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"OpenAI Error: {str(e)}")
 
+@app.get("/debug/database-info")
+def get_database_info():
+    return {
+        "database_url": DATABASE_URL.split('@')[0] + '@***' if '@' in DATABASE_URL else DATABASE_URL,
+        "database_type": "postgresql" if "postgresql" in DATABASE_URL else "sqlite",
+        "engine": str(engine.url).split('@')[0] + '@***' if '@' in str(engine.url) else str(engine.url)
+    }
 
 if __name__ == "__main__":
     import uvicorn
