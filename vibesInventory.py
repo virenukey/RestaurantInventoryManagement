@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./inventory.db")
 
-if DATABASE_URL.startswith("postgresql"):
+if DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://"):
+    # Fix postgres:// URL (Heroku/Render often use this)
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
     engine = create_engine(DATABASE_URL)
 else:
     # SQLite for local development
