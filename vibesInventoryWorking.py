@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Query, UploadFile, File, HTTPException
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, func, desc, and_
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, func, desc, and_, text, \
+    inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import datetime, timedelta, date
@@ -13,11 +14,16 @@ from pydantic import BaseModel
 from dateutil import parser
 import openai
 import os
-#from your_existing_models import Inventory, Expense, Dish, DishIngredient, get_db
+import logging
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# from your_existing_models import Inventory, Expense, Dish, DishIngredient, get_db
 
 # Ideally, set this as an environment variable in production
-#openai.api_key = os.getenv("OPENAI_API_KEY", "")
+# openai.api_key = os.getenv("OPENAI_API_KEY", "")
 DATABASE_URL = "sqlite:///./inventory.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -33,12 +39,94 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+# --- Migration Handler ---
+class RenderSafeMigration:
+    def __init__(self):
+        self.database_url = DATABASE_URL
+        self.engine = engine
+
+    def check_schema_on_startup(self):
+        """Check database schema on startup but don't auto-migrate"""
+        try:
+            logger.info("Checking database schema on startup...")
+
+            inspector = inspect(self.engine)
+
+            # Check if dish_ingredients table exists
+            if 'dish_ingredients' not in inspector.get_table_names():
+                logger.info("dish_ingredients table not found. Creating tables...")
+                Base.metadata.create_all(bind=self.engine)
+                return True
+
+            # Check if unit column exists
+            columns = inspector.get_columns('dish_ingredients')
+            column_names = [col['name'] for col in columns]
+
+            if 'unit' not in column_names:
+                logger.warning("Unit column not found in dish_ingredients table.")
+                logger.info("You can add it manually using the migration endpoint.")
+                return True  # Don't fail startup
+            else:
+                logger.info("Database schema is up to date.")
+                return True
+
+        except Exception as e:
+            logger.error(f"Schema check failed: {e}")
+            return False
+
+    def add_unit_column(self):
+        """Add unit column with simple default value"""
+        try:
+            with self.engine.connect() as connection:
+                trans = connection.begin()
+
+                try:
+                    # Add column with default
+                    logger.info("Adding unit column to dish_ingredients...")
+                    connection.execute(text(
+                        "ALTER TABLE dish_ingredients ADD COLUMN unit VARCHAR DEFAULT 'gm'"
+                    ))
+
+                    # Update existing records to use default 'gm'
+                    logger.info("Setting default unit 'gm' for existing records...")
+                    connection.execute(text("""
+                        UPDATE dish_ingredients 
+                        SET unit = 'gm'
+                        WHERE unit IS NULL OR unit = ''
+                    """))
+
+                    # Verify the migration
+                    result = connection.execute(text(
+                        "SELECT COUNT(*) FROM dish_ingredients WHERE unit IS NOT NULL"
+                    ))
+                    updated_count = result.scalar()
+
+                    trans.commit()
+                    logger.info(f"Migration completed successfully. Updated {updated_count} records.")
+                    return True
+
+                except Exception as e:
+                    logger.error(f"Migration failed: {e}")
+                    trans.rollback()
+                    return False
+
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            return False
+
+
+# Initialize migration handler
+migration_handler = RenderSafeMigration()
+
 
 # --- Models ---
 
@@ -53,6 +141,7 @@ class Inventory(Base):
     type = Column(String)
     date_added = Column(DateTime, default=datetime.utcnow)
 
+
 class Expense(Base):
     __tablename__ = "expenses"
     id = Column(Integer, primary_key=True, index=True)
@@ -61,10 +150,12 @@ class Expense(Base):
     total_cost = Column(Float)
     date = Column(DateTime, default=datetime.utcnow)
 
+
 class DishType(Base):
     __tablename__ = "dish_types"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+
 
 class Dish(Base):
     __tablename__ = "dishes"
@@ -73,12 +164,14 @@ class Dish(Base):
     type_id = Column(Integer, ForeignKey("dish_types.id"))
     type = relationship("DishType")
 
+
 class DishIngredient(Base):
     __tablename__ = "dish_ingredients"
     id = Column(Integer, primary_key=True, index=True)
     ingredient_name = Column(String, index=True)  # <- ingredient name (e.g., "Tomato")
     dish_id = Column(Integer, ForeignKey("dishes.id"))
     quantity_required = Column(Float)
+    unit = Column(String, default="gm")  # NEW COLUMN with default
     dish = relationship("Dish")
 
 
@@ -90,18 +183,24 @@ class InventoryLog(Base):
     date = Column(DateTime, default=datetime.utcnow)
     ingredient = relationship("Inventory")
 
+
 class IngredientInput(BaseModel):
     name: str
     quantity_required: float
+    unit: str = "gm"  # Default unit
+
 
 class AddDishRequest(BaseModel):
     name: str
     type: str
     ingredients: List[IngredientInput]
 
+
 class DishIngredientOut(BaseModel):
     ingredient_name: str
     quantity_required: float
+    unit: str = "gm"  # Default for backward compatibility
+
 
 class DishOut(BaseModel):
     id: int
@@ -112,14 +211,18 @@ class DishOut(BaseModel):
     class Config:
         orm_mode = True
 
+
 class DishIngredientUpdate(BaseModel):
     ingredient_name: str
     quantity_required: float
+    unit: str = "gm"  # Default unit
+
 
 class DishUpdate(BaseModel):
     name: Optional[str] = None
     type: Optional[str] = None
     ingredients: Optional[List[DishIngredientUpdate]] = None
+
 
 class PrepareDishRequest(BaseModel):
     dish_name: str
@@ -127,7 +230,123 @@ class PrepareDishRequest(BaseModel):
     date: Optional[str] = None  # format: YYYY-MM-DD
 
 
-Base.metadata.create_all(bind=engine)
+class OpenAIPromptRequest(BaseModel):
+    prompt: str
+
+
+# Database initialization
+def initialize_database():
+    """Initialize database with schema check only"""
+    try:
+        # First, create basic tables if they don't exist
+        Base.metadata.create_all(bind=engine)
+
+        # Then run schema check (no auto-migration)
+        schema_ok = migration_handler.check_schema_on_startup()
+
+        if not schema_ok:
+            logger.error("Database schema check failed!")
+
+        return schema_ok
+
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        return False
+
+
+# Call this at startup
+database_ready = initialize_database()
+
+
+# --- Migration Endpoints ---
+@app.post("/admin/migrate-add-unit-column")
+def manual_add_unit_column(
+        confirm: bool = Query(False, description="Set to true to confirm migration"),
+        db: Session = Depends(get_db)
+):
+    """Manual endpoint to add unit column - you control when to run this"""
+    if not confirm:
+        return {
+            "message": "Migration not confirmed. Set confirm=true to proceed.",
+            "warning": "This will modify the dish_ingredients table structure.",
+            "current_status": get_migration_status(db)
+        }
+
+    try:
+        success = migration_handler.add_unit_column()
+        if success:
+            return {
+                "message": "Unit column added successfully! All existing ingredients set to 'gm'.",
+                "status": get_migration_status(db)
+            }
+        else:
+            return {
+                "message": "Migration failed. Check logs for details.",
+                "status": "failed"
+            }
+    except Exception as e:
+        return {
+            "message": f"Migration error: {str(e)}",
+            "status": "error"
+        }
+
+
+@app.get("/system/migration-status")
+def get_migration_status(db: Session = Depends(get_db)):
+    """Check migration status"""
+    try:
+        inspector = inspect(engine)
+        columns = [col['name'] for col in inspector.get_columns('dish_ingredients')]
+        has_unit_column = 'unit' in columns
+
+        # Count records with/without units
+        total_ingredients = db.query(DishIngredient).count()
+        ingredients_with_units = db.query(DishIngredient).filter(
+            DishIngredient.unit.isnot(None),
+            DishIngredient.unit != ""
+        ).count()
+
+        return {
+            "migration_complete": has_unit_column and (ingredients_with_units == total_ingredients),
+            "schema_updated": has_unit_column,
+            "data_migrated": ingredients_with_units == total_ingredients,
+            "stats": {
+                "total_ingredients": total_ingredients,
+                "ingredients_with_units": ingredients_with_units,
+                "completion_percentage": round((ingredients_with_units / total_ingredients * 100),
+                                               2) if total_ingredients > 0 else 100
+            }
+        }
+
+    except Exception as e:
+        return {
+            "migration_complete": False,
+            "error": str(e)
+        }
+
+
+@app.get("/health")
+def health_check(db: Session = Depends(get_db)):
+    """Health check endpoint for Render monitoring"""
+    try:
+        # Test database connection
+        db.execute(text("SELECT 1"))
+
+        # Check migration status
+        migration_status = get_migration_status(db)
+
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "migration": migration_status["migration_complete"],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
 # --- Routes ---
 
