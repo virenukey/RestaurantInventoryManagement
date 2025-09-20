@@ -24,8 +24,17 @@ logger = logging.getLogger(__name__)
 
 # Ideally, set this as an environment variable in production
 # openai.api_key = os.getenv("OPENAI_API_KEY", "")
-DATABASE_URL = "sqlite:///./inventory.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+#DATABASE_URL = "sqlite:///./inventory.db"
+#engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./inventory.db")
+
+if DATABASE_URL.startswith("postgresql"):
+    engine = create_engine(DATABASE_URL)
+else:
+    # SQLite for local development
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

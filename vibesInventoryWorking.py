@@ -123,6 +123,93 @@ class RenderSafeMigration:
             logger.error(f"Database connection failed: {e}")
             return False
 
+    def add_costing_column(self):
+        """Add cost_per_unit column with intelligent default calculation"""
+        try:
+            with self.engine.connect() as connection:
+                trans = connection.begin()
+
+                try:
+                    # Check if column already exists
+                    inspector = inspect(self.engine)
+                    columns = [col['name'] for col in inspector.get_columns('dish_ingredients')]
+
+                    if 'cost_per_unit' in columns:
+                        logger.info("Cost_per_unit column already exists.")
+                        trans.rollback()
+                        return True
+
+                    # Add column with default
+                    logger.info("Adding cost_per_unit column to dish_ingredients...")
+                    connection.execute(text(
+                        "ALTER TABLE dish_ingredients ADD COLUMN cost_per_unit REAL DEFAULT 0.0"
+                    ))
+
+                    # Calculate and update cost for existing records
+                    logger.info("Calculating costs for existing ingredients...")
+
+                    # Get all existing dish ingredients
+                    existing_ingredients = connection.execute(text("""
+                        SELECT di.id, di.ingredient_name, di.quantity_required, di.unit
+                        FROM dish_ingredients di
+                        WHERE di.cost_per_unit IS NULL OR di.cost_per_unit = 0.0
+                    """)).fetchall()
+
+                    updated_count = 0
+                    for ingredient in existing_ingredients:
+                        ingredient_id, ingredient_name, quantity_required, unit = ingredient
+
+                        # Find the most recent inventory item for this ingredient
+                        inventory_result = connection.execute(text("""
+                            SELECT price_per_unit, unit as inv_unit
+                            FROM inventory 
+                            WHERE LOWER(name) LIKE LOWER(:ingredient_name)
+                            ORDER BY date_added DESC 
+                            LIMIT 1
+                        """), {"ingredient_name": f"%{ingredient_name}%"}).fetchone()
+
+                        if inventory_result:
+                            price_per_unit, inv_unit = inventory_result
+
+                            # Calculate cost considering unit conversion if needed
+                            cost_per_unit = self._calculate_cost_with_unit_conversion(
+                                price_per_unit, inv_unit, unit or 'gm'
+                            )
+
+                            # Update the ingredient cost
+                            connection.execute(text("""
+                                UPDATE dish_ingredients 
+                                SET cost_per_unit = :cost_per_unit
+                                WHERE id = :ingredient_id
+                            """), {
+                                "cost_per_unit": cost_per_unit,
+                                "ingredient_id": ingredient_id
+                            })
+
+                            updated_count += 1
+                        else:
+                            # No inventory found, set default cost
+                            logger.warning(f"No inventory found for ingredient: {ingredient_name}")
+                            connection.execute(text("""
+                                UPDATE dish_ingredients 
+                                SET cost_per_unit = 1.0
+                                WHERE id = :ingredient_id
+                            """), {"ingredient_id": ingredient_id})
+
+                    trans.commit()
+                    logger.info(
+                        f"Costing column migration completed successfully. Updated {updated_count} records with calculated costs.")
+                    return True
+
+                except Exception as e:
+                    logger.error(f"Costing column migration failed: {e}")
+                    trans.rollback()
+                    return False
+
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            return False
+
 
 # Initialize migration handler
 migration_handler = RenderSafeMigration()
@@ -324,6 +411,71 @@ def get_migration_status(db: Session = Depends(get_db)):
             "error": str(e)
         }
 
+
+@app.post("/admin/migrate-add-costing-column")
+def manual_add_costing_column(
+        confirm: bool = Query(False, description="Set to true to confirm migration"),
+        db: Session = Depends(get_db)
+):
+    """Manual endpoint to add cost_per_unit column"""
+    if not confirm:
+        return {
+            "message": "Migration not confirmed. Set confirm=true to proceed.",
+            "warning": "This will modify the dish_ingredients table structure and calculate costs.",
+            "current_status": get_migration_status(db)
+        }
+
+    try:
+        success = migration_handler.add_costing_column()
+        if success:
+            return {
+                "message": "Costing column added successfully! Costs calculated from inventory prices.",
+                "status": get_migration_status(db)
+            }
+        else:
+            return {
+                "message": "Migration failed. Check logs for details.",
+                "status": "failed"
+            }
+    except Exception as e:
+        return {
+            "message": f"Migration error: {str(e)}",
+            "status": "error"
+        }
+
+
+@app.post("/admin/migrate-all")
+def run_all_migrations(
+        confirm: bool = Query(False, description="Set to true to confirm all migrations"),
+        db: Session = Depends(get_db)
+):
+    """Run all pending migrations at once"""
+    if not confirm:
+        return {
+            "message": "Migration not confirmed. Set confirm=true to proceed.",
+            "warning": "This will run all pending migrations on dish_ingredients table.",
+            "current_status": get_migration_status(db)
+        }
+
+    try:
+        success, migrations_run = migration_handler.run_all_migrations()
+        if success:
+            return {
+                "message": f"All migrations completed successfully! Ran: {', '.join(migrations_run) if migrations_run else 'none needed'}",
+                "migrations_run": migrations_run,
+                "status": get_migration_status(db)
+            }
+        else:
+            return {
+                "message": "Some migrations failed. Check logs for details.",
+                "migrations_run": migrations_run,
+                "status": "failed"
+            }
+    except Exception as e:
+        return {
+            "message": f"Migration error: {str(e)}",
+            "status": "error"
+        }
 
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
