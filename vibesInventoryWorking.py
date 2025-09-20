@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Query, UploadFile, File, HT
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, func, desc, and_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
 from collections import defaultdict, Counter
@@ -10,8 +10,14 @@ from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
 from io import BytesIO
 from pydantic import BaseModel
+from dateutil import parser
+import openai
+import os
+#from your_existing_models import Inventory, Expense, Dish, DishIngredient, get_db
 
 
+# Ideally, set this as an environment variable in production
+#openai.api_key = os.getenv("OPENAI_API_KEY", "")
 DATABASE_URL = "sqlite:///./inventory.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -741,19 +747,37 @@ def get_dish_cost(dish_id: int, db: Session = Depends(get_db)):
 
     ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
     total_cost = 0.0
+    ingredient_costs = []
 
     for di in ingredients:
-        inventory_item = db.query(Inventory).filter(Inventory.name == di.ingredient_name).order_by(Inventory.date).first()
+        # Get the most recent inventory item for this ingredient
+        inventory_item = db.query(Inventory).filter(
+            Inventory.name.ilike(di.ingredient_name)
+        ).order_by(Inventory.date_added.desc()).first()
+
         if not inventory_item:
-            raise HTTPException(status_code=400, detail=f"Ingredient '{di.ingredient_name}' not found in inventory")
-        item_cost = di.quantity_required * inventory_item.unit_price
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ingredient '{di.ingredient_name}' not found in inventory"
+            )
+
+        item_cost = di.quantity_required * inventory_item.price_per_unit
         total_cost += item_cost
+
+        ingredient_costs.append({
+            "ingredient": di.ingredient_name,
+            "quantity_required": di.quantity_required,
+            "unit_price": inventory_item.price_per_unit,
+            "total_cost": item_cost
+        })
 
     return {
         "dish_id": dish.id,
         "dish_name": dish.name,
+        "ingredient_breakdown": ingredient_costs,
         "total_cost": round(total_cost, 2)
     }
+
 
 @app.put("/dishes/{dish_id}")
 def update_dish(dish_id: int, payload: DishUpdate, db: Session = Depends(get_db)):
@@ -804,30 +828,34 @@ def update_dish(dish_id: int, payload: DishUpdate, db: Session = Depends(get_db)
 
 @app.post("/prepare_dish")
 def prepare_dish(
-    request: PrepareDishRequest,
+    dish_name: str = Query(..., description="Name of the dish to prepare"),
+    quantity: float = Query(..., description="Number of servings"),
+    date: Optional[str] = Query(None, description="Preparation date in YYYY-MM-DD format"),
     db: Session = Depends(get_db)
 ):
-    # Parse the preparation date (or default to now)
-    if request.date:
+    # Parse preparation date
+    if date:
         try:
-            prepare_date = datetime.strptime(request.date, "%Y-%m-%d")
+            prepare_date = datetime.strptime(date, "%Y-%m-%d")
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
     else:
         prepare_date = datetime.utcnow()
 
-    dish = db.query(Dish).filter(Dish.name.ilike(request.dish_name.strip())).first()
+    # Fetch dish
+    dish = db.query(Dish).filter(Dish.name.ilike(dish_name.strip())).first()
     if not dish:
-        raise HTTPException(status_code=404, detail=f"Dish '{request.dish_name}' not found")
+        raise HTTPException(status_code=404, detail=f"Dish '{dish_name}' not found")
 
+    # Get ingredients
     dish_ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
     if not dish_ingredients:
-        raise HTTPException(status_code=400, detail=f"No ingredients found for dish '{request.dish_name}'")
+        raise HTTPException(status_code=400, detail=f"No ingredients found for dish '{dish_name}'")
 
     usage_summary = []
 
     for ingredient in dish_ingredients:
-        required_qty = ingredient.quantity_required * request.quantity
+        required_qty = ingredient.quantity_required * quantity
 
         inventory_batches = db.query(Inventory).filter(
             Inventory.name.ilike(ingredient.ingredient_name),
@@ -847,7 +875,7 @@ def prepare_dish(
             unit = batch.unit.strip().lower()
             batch_qty_in_base = batch.quantity
 
-            # Convert to base unit (g, ml, pieces)
+            # Unit conversion
             if unit == "kg":
                 batch_qty_in_base *= 1000
             elif unit in ["g", "gm", "grams"]:
@@ -861,6 +889,7 @@ def prepare_dish(
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported unit '{batch.unit}' for ingredient '{batch.name}'")
 
+            # Deduct from this batch
             deduct_qty = min(batch_qty_in_base, required_qty)
             remaining_qty_in_base = batch_qty_in_base - deduct_qty
             required_qty -= deduct_qty
@@ -879,16 +908,15 @@ def prepare_dish(
 
             db.add(batch)
 
-            # Insert log at specified date
-            log_entry = InventoryLog(
+            # Insert log for this batch
+            db.add(InventoryLog(
                 ingredient_id=batch.id,
                 quantity_left=batch.quantity,
                 date=prepare_date
-            )
-            db.add(log_entry)
+            ))
 
             usage_summary.append({
-                "ingredient": ingredient.ingredient_name,
+                "inventory_name": ingredient.ingredient_name,
                 "inventory_batch_id": batch.id,
                 "used_from_batch": deduct_qty,
                 "remaining_in_batch": batch.quantity,
@@ -896,7 +924,7 @@ def prepare_dish(
                 "logged_at": prepare_date.strftime("%Y-%m-%d")
             })
 
-            # Update all future logs
+            # Update all future logs of this batch
             future_logs = db.query(InventoryLog).filter(
                 and_(
                     InventoryLog.ingredient_id == batch.id,
@@ -910,29 +938,92 @@ def prepare_dish(
                 log.quantity_left = current_quantity
                 db.add(log)
 
-            # ✅ Update Inventory table based on the latest log
-            latest_log = db.query(InventoryLog).filter(
-                InventoryLog.ingredient_id == batch.id
-            ).order_by(InventoryLog.date.desc()).first()
-
-            if latest_log:
-                inventory_entry = db.query(Inventory).filter(Inventory.id == batch.id).first()
-                if inventory_entry:
-                    inventory_entry.quantity = latest_log.quantity_left
-                    db.add(inventory_entry)
-
+        # ❗ Still required quantity means not enough inventory
         if required_qty > 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Not enough '{ingredient.ingredient_name}' in inventory to prepare {request.quantity} servings. Short by {required_qty:.2f} units."
+                detail=f"Not enough '{ingredient.ingredient_name}' in inventory to prepare {quantity} servings. Short by {required_qty:.2f} units."
             )
+
+        # ✅ Recalculate inventory quantity across ALL batches of this ingredient
+        all_batches = db.query(Inventory).filter(
+            Inventory.name.ilike(ingredient.ingredient_name)
+        ).all()
+
+        for b in all_batches:
+            latest_log = db.query(InventoryLog).filter(
+                InventoryLog.ingredient_id == b.id
+            ).order_by(InventoryLog.date.desc()).first()
+
+            if latest_log:
+                b.quantity = latest_log.quantity_left
+                db.add(b)
 
     db.commit()
 
     return {
-        "message": f"Dish '{dish.name}' prepared successfully for {request.quantity} servings on {prepare_date.date()}.",
+        "message": f"Dish '{dish.name}' prepared successfully for {quantity} servings on {prepare_date.date()}.",
         "usage_summary": usage_summary
     }
+
+
+@app.post("/upload_prepare_dish_excel")
+async def upload_prepare_dish_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a .xlsx or .xls file.")
+
+    try:
+        contents = await file.read()
+        workbook = load_workbook(filename=BytesIO(contents))
+        sheet = workbook.active
+
+        headers = [str(cell.value).strip().lower() if cell.value else "" for cell in sheet[1]]
+        required_columns = {"dish_name", "quantity", "date"}
+        col_index = {h: i for i, h in enumerate(headers)}
+
+        missing = required_columns - set(col_index.keys())
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Missing required columns: {', '.join(missing)}")
+
+        success_count = 0
+        failed_rows = []
+
+        for idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            try:
+                dish_name = str(row[col_index["dish_name"]]).strip()
+                quantity = float(row[col_index["quantity"]])
+                #date_str = str(row[col_index["date"]]).strip()
+                date_str = row[col_index["date"]]
+                date = datetime.strptime(date_str, "%Y-%m-%d")
+
+                #date = parser.parse(date_str).date()
+                '''
+                date_raw = row[col_index["date"]]
+                if isinstance(date_raw, datetime):
+                    date = date_raw
+                elif isinstance(date_raw, str):
+                    date= datetime.strptime(date_raw.strip(), "%Y-%m-%d")
+                else:
+                    raise ValueError("Invalid date format in 'date_added'")
+                '''
+                # Call your existing dish preparation logic here
+                # This is a simplified version
+                response = prepare_dish(dish_name, quantity, date, db)
+                if response.get("success"):
+                    success_count += 1
+                else:
+                    failed_rows.append(f"Row {idx}: {response.get('error')}")
+
+            except Exception as e:
+                failed_rows.append(f"Row {idx}: {str(e)}")
+
+        return {
+            "message": f"Processed {success_count} row(s) successfully.",
+            "errors": failed_rows
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.get("/inventory_on_date")
@@ -942,38 +1033,88 @@ def inventory_on_date(date: str, db: Session = Depends(get_db)):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
 
-    next_day = date_parsed + timedelta(days=1)
+    # Step 1: Get all unique ingredient_ids from logs
+    ingredient_ids = db.query(InventoryLog.ingredient_id).distinct().all()
+    ingredient_ids = [i[0] for i in ingredient_ids]
 
-    # Get all logs for the day
-    logs = db.query(InventoryLog).filter(
-        InventoryLog.date >= date_parsed,
-        InventoryLog.date < next_day
-    ).order_by(InventoryLog.ingredient_id, desc(InventoryLog.date)).all()
-
-    # Track the latest log per ingredient_id
-    latest_log_map = {}
-    for log in logs:
-        if log.ingredient_id not in latest_log_map:
-            latest_log_map[log.ingredient_id] = log  # first (latest) log due to descending sort
-
-    # Convert to list for response
     response = []
-    for log in latest_log_map.values():
-        # Optional: join with inventory to get ingredient name
-        inventory_item = db.query(Inventory).filter(Inventory.id == log.ingredient_id).first()
-        response.append({
-            "ingredient_id": log.ingredient_id,
-            "inventory_name": inventory_item.name if inventory_item else "Unknown",
-            "unit": inventory_item.unit if inventory_item else "",
-            "quantity_left": log.quantity_left,
-            "log_time": log.date.strftime("%Y-%m-%d %H:%M:%S")
-        })
+
+    # Step 2: For each ingredient, get the latest log <= selected date
+    for ingredient_id in ingredient_ids:
+        latest_log = db.query(InventoryLog).filter(
+            InventoryLog.ingredient_id == ingredient_id,
+            InventoryLog.date <= date_parsed
+        ).order_by(InventoryLog.date.desc()).first()
+
+        if latest_log:
+            inventory_item = db.query(Inventory).filter(Inventory.id == ingredient_id).first()
+            response.append({
+                "ingredient_id": ingredient_id,
+                "ingredient_name": inventory_item.name if inventory_item else "Unknown",
+                "unit": inventory_item.unit if inventory_item else "",
+                "quantity_left": latest_log.quantity_left,
+                "log_time": latest_log.date.strftime("%Y-%m-%d %H:%M:%S")
+            })
 
     return response
 
 
+class OpenAIPromptRequest(BaseModel):
+    prompt: str
 
+@app.post("/ask_openai")
+def ask_openai(request: OpenAIPromptRequest, db: Session = Depends(get_db)):
+    try:
+        prompt = request.prompt.strip()
 
+        # Limit Inventory and Expense records
+        #inventory_items = db.query(Inventory).order_by(Inventory.date_added.desc()).limit(50).all()
+        inventory_items = db.query(Inventory).order_by(Inventory.date_added.desc()).all()
+        #expenses = db.query(Expense).order_by(Expense.date.desc()).limit(50).all()
+
+        # Summarized Inventory Summary including Total Cost
+        inventory_summary = "\n".join(
+            [
+                f"{item.name} ({item.quantity} {item.unit}), Type: {item.type}, Total Cost: ₹{item.total_cost}"
+                for item in inventory_items
+            ]
+        )
+
+        '''
+        # Summarized Expense Summary
+        expense_summary = "\n".join(
+            [
+                f"{exp.item_name}: ₹{exp.total_cost} on {exp.date.date()}"
+                for exp in expenses
+            ]
+        )
+        '''
+
+        # System prompt
+        system_prompt = (
+            "You are an expert restaurant Inventory and Expense report generator."
+            " Use the provided data below to answer the user's specific question or create a report."
+            "\n\nInventory Data (latest 50 items):\n" + inventory_summary
+        )
+
+        # OpenAI Request
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo-1106",  # or gpt-4-1106-preview if you have access
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=1500,   # Safe
+        )
+
+        ai_message = response['choices'][0]['message']['content']
+        return {"response": ai_message}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"OpenAI Error: {str(e)}")
 
 
 if __name__ == "__main__":
