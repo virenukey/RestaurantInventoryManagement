@@ -821,6 +821,7 @@ def expense_report(
         "most_frequent_inventory": most_frequent_inventory
     }
 
+
 @app.post("/upload_inventory_excel")
 async def upload_inventory_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith((".xlsx", ".xls")):
@@ -851,71 +852,178 @@ async def upload_inventory_excel(file: UploadFile = File(...), db: Session = Dep
                 if not row or all(cell is None for cell in row):
                     continue  # Skip empty rows
 
-                name = row[col_index["name"]]
-                quantity = float(row[col_index["quantity"]])
-                unit = row[col_index["unit"]]
-
-                price_per_unit = float(row[col_index["price_per_unit"]]) if "price_per_unit" in col_index and row[col_index["price_per_unit"]] is not None else None
-                total_cost = float(row[col_index["total_cost"]]) if "total_cost" in col_index and row[col_index["total_cost"]] is not None else None
-                type_ = str(row[col_index["type"]]).strip() if "type" in col_index and row[col_index["type"]] is not None else ""
-
-                if price_per_unit is not None:
-                    total_cost = quantity * price_per_unit
-                elif total_cost is not None:
-                    price_per_unit = total_cost / quantity
-                else:
-                    skipped_rows.append(f"Row {idx}: Missing price_per_unit and total_cost.")
+                # Basic field extraction with null checks
+                name = str(row[col_index["name"]]).strip() if row[col_index["name"]] is not None else ""
+                if not name:
+                    skipped_rows.append(f"Row {idx}: Empty name field.")
                     continue
 
+                try:
+                    quantity = float(row[col_index["quantity"]])
+                except (ValueError, TypeError):
+                    skipped_rows.append(f"Row {idx}: Invalid quantity value.")
+                    continue
+
+                unit = str(row[col_index["unit"]]).strip() if row[col_index["unit"]] is not None else ""
+                if not unit:
+                    skipped_rows.append(f"Row {idx}: Empty unit field.")
+                    continue
+
+                # Handle price and cost calculations with better error handling
+                price_per_unit = None
+                total_cost = None
+
+                if "price_per_unit" in col_index and row[col_index["price_per_unit"]] is not None:
+                    try:
+                        price_per_unit = float(row[col_index["price_per_unit"]])
+                    except (ValueError, TypeError):
+                        pass
+
+                if "total_cost" in col_index and row[col_index["total_cost"]] is not None:
+                    try:
+                        total_cost = float(row[col_index["total_cost"]])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Calculate missing values
+                if price_per_unit is not None and total_cost is None:
+                    total_cost = quantity * price_per_unit
+                elif total_cost is not None and price_per_unit is None:
+                    price_per_unit = total_cost / quantity if quantity != 0 else 0
+                elif price_per_unit is None and total_cost is None:
+                    skipped_rows.append(f"Row {idx}: Missing both price_per_unit and total_cost.")
+                    continue
+
+                # Handle type field
+                type_ = ""
+                if "type" in col_index and row[col_index["type"]] is not None:
+                    type_ = str(row[col_index["type"]]).strip()
+
+                # Enhanced date parsing
+                date_added = None
                 date_raw = row[col_index["date_added"]]
-                if isinstance(date_raw, datetime):
+
+                if date_raw is None:
+                    date_added = datetime.utcnow()
+                elif isinstance(date_raw, datetime):
                     date_added = date_raw
                 elif isinstance(date_raw, str):
-                    date_added = datetime.strptime(date_raw.strip(), "%Y-%m-%d")
+                    try:
+                        # Try multiple date formats
+                        date_str = date_raw.strip()
+                        if 'T' in date_str:
+                            # ISO format
+                            date_added = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                        elif len(date_str) == 10:
+                            # YYYY-MM-DD format
+                            date_added = datetime.strptime(date_str, "%Y-%m-%d")
+                        elif len(date_str) == 19:
+                            # YYYY-MM-DD HH:MM:SS format
+                            date_added = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+                        else:
+                            raise ValueError("Unrecognized date format")
+                    except ValueError as e:
+                        skipped_rows.append(f"Row {idx}: Invalid date format '{date_raw}'. Use YYYY-MM-DD.")
+                        continue
                 else:
-                    raise ValueError("Invalid date format in 'date_added'")
+                    try:
+                        # Handle Excel date numbers
+                        from datetime import date as date_type
+                        if isinstance(date_raw, (int, float)):
+                            # Excel date serial number
+                            excel_epoch = datetime(1900, 1, 1)
+                            date_added = excel_epoch + timedelta(days=date_raw - 2)  # Excel counts from 1900-01-01
+                        else:
+                            date_added = datetime.utcnow()
+                    except:
+                        date_added = datetime.utcnow()
 
-                # Check if an exact item already exists
+                # Check for existing items with more flexible matching
                 existing = db.query(Inventory).filter(
                     Inventory.name == name,
-                    Inventory.quantity == quantity,
                     Inventory.unit == unit,
-                    Inventory.price_per_unit == price_per_unit,
-                    Inventory.total_cost == total_cost,
-                    Inventory.type == type_,
-                    Inventory.date_added == date_added
+                    func.abs(Inventory.quantity - quantity) < 0.001,  # Float comparison
+                    func.abs(Inventory.total_cost - total_cost) < 0.01  # Float comparison
                 ).first()
 
                 if existing:
-                    skipped_rows.append(f"Row {idx}: Exact item already exists. Skipped.")
+                    skipped_rows.append(f"Row {idx}: Similar item already exists. Skipped.")
                     continue
 
+                # Create inventory item with explicit field assignment
                 item = Inventory(
                     name=name,
-                    quantity=quantity,
+                    quantity=float(quantity),
                     unit=unit,
-                    price_per_unit=price_per_unit,
-                    total_cost=total_cost,
+                    price_per_unit=float(price_per_unit) if price_per_unit is not None else 0.0,
+                    total_cost=float(total_cost) if total_cost is not None else 0.0,
                     type=type_,
                     date_added=date_added
                 )
+
+                # Create expense record
+                expense = Expense(
+                    item_name=name,
+                    quantity=float(quantity),
+                    total_cost=float(total_cost) if total_cost is not None else 0.0,
+                    date=date_added
+                )
+
+                # Add to session but don't commit yet
                 db.add(item)
-                db.add(Expense(item_name=name, quantity=quantity, total_cost=total_cost, date=date_added))
+                db.add(expense)
+
+                # Flush to catch any immediate database errors
+                db.flush()
+
                 added_items.append(name)
 
             except Exception as row_error:
-                skipped_rows.append(f"Row {idx}: {str(row_error)}")
+                # Enhanced error logging for debugging
+                import traceback
+                error_detail = f"Row {idx}: {str(row_error)}"
+                logger.error(f"Row processing error: {error_detail}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                skipped_rows.append(error_detail)
+                # Continue processing other rows
+                continue
 
-        db.commit()
+        # Commit all changes at once
+        try:
+            db.commit()
+        except Exception as commit_error:
+            db.rollback()
+            logger.error(f"Database commit failed: {str(commit_error)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database commit failed: {str(commit_error)}"
+            )
 
         return {
             "message": "Excel processed successfully",
             "added_items": added_items,
-            "skipped_rows": skipped_rows
+            "skipped_rows": skipped_rows,
+            "summary": {
+                "total_processed": len(added_items) + len(skipped_rows),
+                "successful": len(added_items),
+                "skipped": len(skipped_rows)
+            }
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        # Enhanced error handling
+        import traceback
+        error_msg = f"Internal server error: {str(e)}"
+        logger.error(f"Excel upload failed: {error_msg}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+        # Rollback any pending transaction
+        try:
+            db.rollback()
+        except:
+            pass
+
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.post("/upload_dish_excel")
