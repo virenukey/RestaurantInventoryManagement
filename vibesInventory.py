@@ -1322,11 +1322,15 @@ def update_dish(dish_id: int, payload: DishUpdate, db: Session = Depends(get_db)
 
 @app.post("/prepare_dish")
 def prepare_dish(
-    dish_name: str = Query(..., description="Name of the dish to prepare"),
-    quantity: float = Query(..., description="Number of servings"),
-    date: Optional[str] = Query(None, description="Preparation date in YYYY-MM-DD format"),
-    db: Session = Depends(get_db)
+        dish_name: str = Query(..., description="Name of the dish to prepare"),
+        quantity: float = Query(..., description="Number of servings"),
+        date: Optional[str] = Query(None, description="Preparation date in YYYY-MM-DD format"),
+        db: Session = Depends(get_db)
 ):
+    # Input validation
+    if quantity <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be positive")
+
     # Parse preparation date
     if date:
         try:
@@ -1341,16 +1345,20 @@ def prepare_dish(
     if not dish:
         raise HTTPException(status_code=404, detail=f"Dish '{dish_name}' not found")
 
-    # Get ingredients
+    # Get ingredients with unit information
     dish_ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
     if not dish_ingredients:
         raise HTTPException(status_code=400, detail=f"No ingredients found for dish '{dish_name}'")
 
-    usage_summary = []
+    # Pre-flight check: verify all ingredients are available
+    availability_check = []
+    total_cost = 0.0
 
     for ingredient in dish_ingredients:
         required_qty = ingredient.quantity_required * quantity
+        recipe_unit = getattr(ingredient, 'unit', 'gm').strip().lower()
 
+        # Get available inventory for this ingredient
         inventory_batches = db.query(Inventory).filter(
             Inventory.name.ilike(ingredient.ingredient_name),
             Inventory.quantity > 0
@@ -1362,107 +1370,562 @@ def prepare_dish(
                 detail=f"No inventory available for {ingredient.ingredient_name}"
             )
 
+        # Calculate total available quantity with unit conversion
+        total_available = 0.0
+        cost_per_unit_avg = 0.0
+        total_value = 0.0
+
         for batch in inventory_batches:
-            if required_qty <= 0:
-                break
+            batch_unit = batch.unit.strip().lower()
+            converted_qty = convert_to_base_unit(batch.quantity, batch_unit, recipe_unit)
+            total_available += converted_qty
+            total_value += batch.quantity * batch.price_per_unit
 
-            unit = batch.unit.strip().lower()
-            batch_qty_in_base = batch.quantity
-
-            # Unit conversion
-            if unit == "kg":
-                batch_qty_in_base *= 1000
-            elif unit in ["g", "gm", "grams"]:
-                pass
-            elif unit in ["liter", "litre", "l"]:
-                batch_qty_in_base *= 1000
-            elif unit == "ml":
-                pass
-            elif unit in ["piece", "pieces", "pc", "pcs", "pack", "packs"]:
-                pass
-            else:
-                raise HTTPException(status_code=400, detail=f"Unsupported unit '{batch.unit}' for ingredient '{batch.name}'")
-
-            # Deduct from this batch
-            deduct_qty = min(batch_qty_in_base, required_qty)
-            remaining_qty_in_base = batch_qty_in_base - deduct_qty
-            required_qty -= deduct_qty
-
-            # Convert back to original unit
-            if unit == "kg":
-                batch.quantity = remaining_qty_in_base / 1000
-            elif unit in ["g", "gm", "grams"]:
-                batch.quantity = remaining_qty_in_base
-            elif unit in ["liter", "litre", "l"]:
-                batch.quantity = remaining_qty_in_base / 1000
-            elif unit == "ml":
-                batch.quantity = remaining_qty_in_base
-            elif unit in ["piece", "pieces", "pc", "pcs", "pack", "packs"]:
-                batch.quantity = remaining_qty_in_base
-
-            db.add(batch)
-
-            # Insert log for this batch
-            db.add(InventoryLog(
-                ingredient_id=batch.id,
-                quantity_left=batch.quantity,
-                date=prepare_date
-            ))
-
-            usage_summary.append({
-                "inventory_name": ingredient.ingredient_name,
-                "inventory_batch_id": batch.id,
-                "used_from_batch": deduct_qty,
-                "remaining_in_batch": batch.quantity,
-                "unit": unit,
-                "logged_at": prepare_date.strftime("%Y-%m-%d")
-            })
-
-            # Update all future logs of this batch
-            future_logs = db.query(InventoryLog).filter(
-                and_(
-                    InventoryLog.ingredient_id == batch.id,
-                    InventoryLog.date > prepare_date
-                )
-            ).order_by(InventoryLog.date.asc()).all()
-
-            current_quantity = batch.quantity
-
-            for log in future_logs:
-                log.quantity_left = current_quantity
-                db.add(log)
-
-        # ❗ Still required quantity means not enough inventory
-        if required_qty > 0:
+        if total_available < required_qty:
+            shortage = required_qty - total_available
             raise HTTPException(
                 status_code=400,
-                detail=f"Not enough '{ingredient.ingredient_name}' in inventory to prepare {quantity} servings. Short by {required_qty:.2f} units."
+                detail=f"Insufficient {ingredient.ingredient_name}: need {required_qty:.2f} {recipe_unit}, "
+                       f"available {total_available:.2f} {recipe_unit}, short by {shortage:.2f} {recipe_unit}"
             )
 
-        # ✅ Recalculate inventory quantity across ALL batches of this ingredient
-        all_batches = db.query(Inventory).filter(
-            Inventory.name.ilike(ingredient.ingredient_name)
+        # Calculate average cost per unit
+        if total_available > 0:
+            cost_per_unit_avg = total_value / sum(b.quantity for b in inventory_batches)
+            total_cost += required_qty * cost_per_unit_avg
+
+        availability_check.append({
+            "ingredient": ingredient.ingredient_name,
+            "required": required_qty,
+            "available": total_available,
+            "unit": recipe_unit,
+            "estimated_cost": required_qty * cost_per_unit_avg
+        })
+
+    # All ingredients available, proceed with preparation
+    usage_summary = []
+
+    try:
+        for ingredient in dish_ingredients:
+            required_qty = ingredient.quantity_required * quantity
+            recipe_unit = getattr(ingredient, 'unit', 'gm').strip().lower()
+
+            inventory_batches = db.query(Inventory).filter(
+                Inventory.name.ilike(ingredient.ingredient_name),
+                Inventory.quantity > 0
+            ).order_by(Inventory.date_added.asc()).all()
+
+            remaining_required = required_qty
+
+            for batch in inventory_batches:
+                if remaining_required <= 0:
+                    break
+
+                batch_unit = batch.unit.strip().lower()
+
+                # Convert batch quantity to recipe unit for comparison
+                batch_qty_in_recipe_unit = convert_to_base_unit(batch.quantity, batch_unit, recipe_unit)
+
+                # Determine how much to deduct from this batch
+                deduct_qty_in_recipe_unit = min(batch_qty_in_recipe_unit, remaining_required)
+
+                # Convert back to batch unit for inventory update
+                deduct_qty_in_batch_unit = convert_from_base_unit(deduct_qty_in_recipe_unit, batch_unit, recipe_unit)
+
+                # Update batch quantity
+                new_batch_quantity = batch.quantity - deduct_qty_in_batch_unit
+                batch.quantity = max(0, new_batch_quantity)  # Ensure no negative quantities
+
+                # Create inventory log
+                inventory_log = InventoryLog(
+                    ingredient_id=batch.id,
+                    quantity_left=batch.quantity,
+                    date=prepare_date
+                )
+                db.add(inventory_log)
+
+                # Add to usage summary
+                usage_summary.append({
+                    "ingredient_name": ingredient.ingredient_name,
+                    "inventory_batch_id": batch.id,
+                    "batch_unit": batch_unit,
+                    "recipe_unit": recipe_unit,
+                    "used_from_batch": {
+                        "quantity": deduct_qty_in_batch_unit,
+                        "unit": batch_unit
+                    },
+                    "recipe_equivalent": {
+                        "quantity": deduct_qty_in_recipe_unit,
+                        "unit": recipe_unit
+                    },
+                    "remaining_in_batch": batch.quantity,
+                    "cost": deduct_qty_in_batch_unit * batch.price_per_unit,
+                    "logged_at": prepare_date.strftime("%Y-%m-%d %H:%M:%S")
+                })
+
+                remaining_required -= deduct_qty_in_recipe_unit
+
+            # Final check - should not happen due to pre-flight check
+            if remaining_required > 0.001:  # Small tolerance for floating point errors
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Internal error: Still need {remaining_required:.3f} {recipe_unit} of {ingredient.ingredient_name}"
+                )
+
+        # Commit all changes
+        db.commit()
+
+        return {
+            "success": True,
+            "message": f"Dish '{dish.name}' prepared successfully for {quantity} servings on {prepare_date.date()}.",
+            "preparation_details": {
+                "dish_name": dish.name,
+                "servings": quantity,
+                "preparation_date": prepare_date.strftime("%Y-%m-%d %H:%M:%S"),
+                "total_estimated_cost": round(total_cost, 2)
+            },
+            "usage_summary": usage_summary,
+            "ingredients_check": availability_check
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to prepare dish: {str(e)}"
+        )
+
+
+def convert_to_base_unit(quantity: float, from_unit: str, to_unit: str) -> float:
+    """Convert quantity from one unit to another within the same category"""
+    from_unit = from_unit.lower()
+    to_unit = to_unit.lower()
+
+    # If units are the same, no conversion needed
+    if from_unit == to_unit:
+        return quantity
+
+    # Weight conversions (base unit: grams)
+    weight_units = {
+        'gm': 1, 'g': 1, 'grams': 1,
+        'kg': 1000, 'kilogram': 1000, 'kilograms': 1000,
+        'oz': 28.3495, 'ounce': 28.3495, 'ounces': 28.3495,
+        'lb': 453.592, 'pound': 453.592, 'pounds': 453.592
+    }
+
+    # Volume conversions (base unit: ml)
+    volume_units = {
+        'ml': 1, 'milliliter': 1, 'milliliters': 1,
+        'l': 1000, 'liter': 1000, 'liters': 1000, 'litre': 1000, 'litres': 1000,
+        'cup': 240, 'cups': 240,
+        'tablespoon': 15, 'tablespoons': 15, 'tbsp': 15,
+        'teaspoon': 5, 'teaspoons': 5, 'tsp': 5
+    }
+
+    # Count units (no conversion, must match exactly)
+    count_units = {
+        'piece': 1, 'pieces': 1, 'pc': 1, 'pcs': 1,
+        'item': 1, 'items': 1, 'unit': 1, 'units': 1,
+        'pack': 1, 'packs': 1, 'packet': 1, 'packets': 1
+    }
+
+    # Check if both units are in the same category
+    if from_unit in weight_units and to_unit in weight_units:
+        # Convert to grams, then to target unit
+        grams = quantity * weight_units[from_unit]
+        return grams / weight_units[to_unit]
+
+    elif from_unit in volume_units and to_unit in volume_units:
+        # Convert to ml, then to target unit
+        ml = quantity * volume_units[from_unit]
+        return ml / volume_units[to_unit]
+
+    elif from_unit in count_units and to_unit in count_units:
+        # Count units should be the same
+        return quantity
+
+    else:
+        # Incompatible units - return as-is but log warning
+        logger.warning(f"Cannot convert from {from_unit} to {to_unit} - incompatible unit types")
+        return quantity
+
+
+def convert_from_base_unit(quantity: float, target_unit: str, base_unit: str) -> float:
+    """Convert from base unit back to target unit"""
+    return convert_to_base_unit(quantity, base_unit, target_unit)
+
+
+# Enhanced preparation with unit compatibility check
+@app.post("/prepare_dish_check")
+def prepare_dish_check(
+        dish_name: str = Query(..., description="Name of the dish to prepare"),
+        quantity: float = Query(..., description="Number of servings"),
+        db: Session = Depends(get_db)
+):
+    """Check if dish can be prepared without actually preparing it"""
+
+    # Fetch dish
+    dish = db.query(Dish).filter(Dish.name.ilike(dish_name.strip())).first()
+    if not dish:
+        raise HTTPException(status_code=404, detail=f"Dish '{dish_name}' not found")
+
+    # Get ingredients
+    dish_ingredients = db.query(DishIngredient).filter(DishIngredient.dish_id == dish.id).all()
+    if not dish_ingredients:
+        raise HTTPException(status_code=400, detail=f"No ingredients found for dish '{dish_name}'")
+
+    availability_report = []
+    can_prepare = True
+    total_estimated_cost = 0.0
+
+    for ingredient in dish_ingredients:
+        required_qty = ingredient.quantity_required * quantity
+        recipe_unit = getattr(ingredient, 'unit', 'gm').strip().lower()
+
+        # Get available inventory
+        inventory_batches = db.query(Inventory).filter(
+            Inventory.name.ilike(ingredient.ingredient_name),
+            Inventory.quantity > 0
         ).all()
 
-        for b in all_batches:
-            latest_log = db.query(InventoryLog).filter(
-                InventoryLog.ingredient_id == b.id
-            ).order_by(InventoryLog.date.desc()).first()
+        total_available = 0.0
+        estimated_cost = 0.0
 
-            if latest_log:
-                b.quantity = latest_log.quantity_left
-                db.add(b)
+        for batch in inventory_batches:
+            batch_unit = batch.unit.strip().lower()
+            converted_qty = convert_to_base_unit(batch.quantity, batch_unit, recipe_unit)
+            total_available += converted_qty
+            estimated_cost += min(converted_qty, required_qty) * batch.price_per_unit
 
-    db.commit()
+        ingredient_status = {
+            "ingredient": ingredient.ingredient_name,
+            "required": required_qty,
+            "available": total_available,
+            "unit": recipe_unit,
+            "sufficient": total_available >= required_qty,
+            "shortage": max(0, required_qty - total_available),
+            "estimated_cost": estimated_cost
+        }
+
+        if not ingredient_status["sufficient"]:
+            can_prepare = False
+
+        total_estimated_cost += estimated_cost
+        availability_report.append(ingredient_status)
 
     return {
-        "message": f"Dish '{dish.name}' prepared successfully for {quantity} servings on {prepare_date.date()}.",
-        "usage_summary": usage_summary
+        "can_prepare": can_prepare,
+        "dish_name": dish.name,
+        "servings": quantity,
+        "total_estimated_cost": round(total_estimated_cost, 2),
+        "ingredients_status": availability_report
     }
 
 
 @app.post("/upload_prepare_dish_excel")
 async def upload_prepare_dish_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload Excel file to prepare multiple dishes"""
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a .xlsx or .xls file.")
+
+    try:
+        contents = await file.read()
+        workbook = load_workbook(filename=BytesIO(contents))
+        sheet = workbook.active
+
+        # Parse headers
+        headers = [str(cell.value).strip().lower() if cell.value else "" for cell in sheet[1]]
+        required_columns = {"dish_name", "quantity", "date"}
+        optional_columns = {"notes", "batch_id", "cost_center"}  # Optional fields for business tracking
+
+        col_index = {h: i for i, h in enumerate(headers)}
+
+        # Validate required columns
+        missing = required_columns - set(col_index.keys())
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required columns: {', '.join(missing)}. Required: {', '.join(required_columns)}"
+            )
+
+        # Batch processing statistics
+        processing_stats = {
+            "total_rows": 0,
+            "successful_preparations": 0,
+            "failed_preparations": 0,
+            "skipped_rows": 0,
+            "total_cost": 0.0,
+            "total_servings": 0
+        }
+
+        successful_preparations = []
+        failed_rows = []
+        dish_summary = {}
+
+        # Pre-validation: Check all rows first
+        valid_rows = []
+        for idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            processing_stats["total_rows"] += 1
+
+            try:
+                if not row or all(cell is None for cell in row):
+                    processing_stats["skipped_rows"] += 1
+                    continue
+
+                # Extract and validate data
+                dish_name = str(row[col_index["dish_name"]]).strip() if row[col_index["dish_name"]] else ""
+                if not dish_name:
+                    failed_rows.append(f"Row {idx}: Empty dish name")
+                    continue
+
+                try:
+                    quantity = float(row[col_index["quantity"]])
+                    if quantity <= 0:
+                        failed_rows.append(f"Row {idx}: Quantity must be positive, got {quantity}")
+                        continue
+                except (ValueError, TypeError):
+                    failed_rows.append(f"Row {idx}: Invalid quantity value '{row[col_index['quantity']]}'")
+                    continue
+
+                # Enhanced date parsing
+                date_str = None
+                date_raw = row[col_index["date"]]
+
+                if date_raw is None:
+                    # Use current date if not provided
+                    preparation_date = datetime.utcnow()
+                elif isinstance(date_raw, datetime):
+                    preparation_date = date_raw
+                elif isinstance(date_raw, str):
+                    try:
+                        date_str = date_raw.strip()
+                        if 'T' in date_str:
+                            preparation_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                        elif len(date_str) == 10:
+                            preparation_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        elif len(date_str) == 19:
+                            preparation_date = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+                        else:
+                            preparation_date = datetime.strptime(date_str, "%Y-%m-%d")
+                    except ValueError:
+                        failed_rows.append(f"Row {idx}: Invalid date format '{date_raw}'. Use YYYY-MM-DD")
+                        continue
+                else:
+                    try:
+                        # Handle Excel date numbers
+                        if isinstance(date_raw, (int, float)):
+                            excel_epoch = datetime(1900, 1, 1)
+                            preparation_date = excel_epoch + timedelta(days=date_raw - 2)
+                        else:
+                            preparation_date = datetime.utcnow()
+                    except:
+                        preparation_date = datetime.utcnow()
+
+                # Extract optional fields
+                notes = ""
+                if "notes" in col_index and row[col_index["notes"]]:
+                    notes = str(row[col_index["notes"]]).strip()
+
+                batch_id = ""
+                if "batch_id" in col_index and row[col_index["batch_id"]]:
+                    batch_id = str(row[col_index["batch_id"]]).strip()
+
+                cost_center = ""
+                if "cost_center" in col_index and row[col_index["cost_center"]]:
+                    cost_center = str(row[col_index["cost_center"]]).strip()
+
+                valid_rows.append({
+                    "row_number": idx,
+                    "dish_name": dish_name,
+                    "quantity": quantity,
+                    "preparation_date": preparation_date,
+                    "notes": notes,
+                    "batch_id": batch_id,
+                    "cost_center": cost_center
+                })
+
+            except Exception as e:
+                failed_rows.append(f"Row {idx}: Validation error - {str(e)}")
+
+        if not valid_rows:
+            return {
+                "success": False,
+                "message": "No valid rows found to process",
+                "statistics": processing_stats,
+                "failed_rows": failed_rows
+            }
+
+        # Pre-flight check: Verify all dishes can be prepared
+        print(f"Pre-flight check for {len(valid_rows)} dishes...")
+
+        # Group by dish to optimize checking
+        dish_groups = {}
+        for row_data in valid_rows:
+            dish_name = row_data["dish_name"]
+            if dish_name not in dish_groups:
+                dish_groups[dish_name] = []
+            dish_groups[dish_name].append(row_data)
+
+        # Check each unique dish
+        unavailable_dishes = []
+        for dish_name, rows in dish_groups.items():
+            total_servings = sum(row["quantity"] for row in rows)
+
+            try:
+                # Use the check endpoint we created earlier
+                check_result = prepare_dish_check(dish_name, total_servings, db)
+                if not check_result["can_prepare"]:
+                    unavailable_dishes.append({
+                        "dish": dish_name,
+                        "total_servings_requested": total_servings,
+                        "issues": [ing for ing in check_result["ingredients_status"] if not ing["sufficient"]]
+                    })
+            except HTTPException as e:
+                unavailable_dishes.append({
+                    "dish": dish_name,
+                    "error": str(e.detail)
+                })
+
+        if unavailable_dishes:
+            return {
+                "success": False,
+                "message": "Cannot prepare some dishes due to insufficient inventory",
+                "unavailable_dishes": unavailable_dishes,
+                "suggestion": "Check inventory levels and try again"
+            }
+
+        # All dishes can be prepared, proceed with actual preparation
+        print(f"All checks passed. Preparing {len(valid_rows)} dishes...")
+
+        try:
+            # Process each preparation
+            for row_data in valid_rows:
+                try:
+                    # Call the enhanced prepare_dish function
+                    preparation_result = prepare_dish(
+                        dish_name=row_data["dish_name"],
+                        quantity=row_data["quantity"],
+                        date=row_data["preparation_date"].strftime("%Y-%m-%d"),
+                        db=db
+                    )
+
+                    if preparation_result.get("success"):
+                        processing_stats["successful_preparations"] += 1
+                        processing_stats["total_servings"] += row_data["quantity"]
+                        processing_stats["total_cost"] += preparation_result["preparation_details"].get(
+                            "total_estimated_cost", 0)
+
+                        # Track dish summary
+                        dish_name = row_data["dish_name"]
+                        if dish_name not in dish_summary:
+                            dish_summary[dish_name] = {
+                                "total_servings": 0,
+                                "total_cost": 0,
+                                "preparation_count": 0
+                            }
+
+                        dish_summary[dish_name]["total_servings"] += row_data["quantity"]
+                        dish_summary[dish_name]["total_cost"] += preparation_result["preparation_details"].get(
+                            "total_estimated_cost", 0)
+                        dish_summary[dish_name]["preparation_count"] += 1
+
+                        successful_preparations.append({
+                            "row": row_data["row_number"],
+                            "dish": dish_name,
+                            "servings": row_data["quantity"],
+                            "cost": preparation_result["preparation_details"].get("total_estimated_cost", 0),
+                            "date": row_data["preparation_date"].strftime("%Y-%m-%d"),
+                            "notes": row_data["notes"],
+                            "batch_id": row_data["batch_id"]
+                        })
+                    else:
+                        processing_stats["failed_preparations"] += 1
+                        failed_rows.append(
+                            f"Row {row_data['row_number']}: Preparation failed - {preparation_result.get('message', 'Unknown error')}")
+
+                except HTTPException as e:
+                    processing_stats["failed_preparations"] += 1
+                    failed_rows.append(f"Row {row_data['row_number']}: {e.detail}")
+                except Exception as e:
+                    processing_stats["failed_preparations"] += 1
+                    failed_rows.append(f"Row {row_data['row_number']}: Unexpected error - {str(e)}")
+
+            # Final commit for any remaining transactions
+            db.commit()
+
+        except Exception as e:
+            # Rollback all changes if batch processing fails
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Batch preparation failed: {str(e)}. All changes have been rolled back."
+            )
+
+        # Generate comprehensive report
+        success_rate = (processing_stats["successful_preparations"] / processing_stats["total_rows"] * 100) if \
+        processing_stats["total_rows"] > 0 else 0
+
+        return {
+            "success": True,
+            "message": f"Batch dish preparation completed. {processing_stats['successful_preparations']}/{processing_stats['total_rows']} preparations successful.",
+            "statistics": {
+                **processing_stats,
+                "success_rate_percentage": round(success_rate, 2)
+            },
+            "dish_summary": dish_summary,
+            "successful_preparations": successful_preparations,
+            "failed_rows": failed_rows,
+            "recommendations": generate_preparation_recommendations(dish_summary, failed_rows)
+        }
+
+    except Exception as e:
+        # Log the full error for debugging
+        import traceback
+        logger.error(f"Excel dish preparation upload failed: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+        try:
+            db.rollback()
+        except:
+            pass
+
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+def generate_preparation_recommendations(dish_summary: dict, failed_rows: list) -> list:
+    """Generate recommendations based on preparation results"""
+    recommendations = []
+
+    if dish_summary:
+        # Most prepared dish
+        most_prepared = max(dish_summary.items(), key=lambda x: x[1]["total_servings"])
+        recommendations.append(
+            f"Most prepared dish: {most_prepared[0]} ({most_prepared[1]['total_servings']} servings)")
+
+        # Highest cost dish
+        if any(dish["total_cost"] > 0 for dish in dish_summary.values()):
+            highest_cost = max(dish_summary.items(), key=lambda x: x[1]["total_cost"])
+            recommendations.append(f"Highest cost dish: {highest_cost[0]} (₹{highest_cost[1]['total_cost']:.2f})")
+
+    if failed_rows:
+        recommendations.append(f"Review {len(failed_rows)} failed preparations for inventory restocking needs")
+
+        # Analyze common failure patterns
+        ingredient_failures = [row for row in failed_rows if
+                               "inventory" in row.lower() or "insufficient" in row.lower()]
+        if ingredient_failures:
+            recommendations.append("Consider restocking ingredients that caused preparation failures")
+
+    if not recommendations:
+        recommendations.append("All preparations completed successfully!")
+
+    return recommendations
+
+
+# Additional endpoint for preparation planning
+@app.post("/plan_dish_preparation_excel")
+async def plan_dish_preparation_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Analyze Excel file and provide preparation feasibility report without actually preparing dishes"""
     if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload a .xlsx or .xls file.")
 
@@ -1472,53 +1935,66 @@ async def upload_prepare_dish_excel(file: UploadFile = File(...), db: Session = 
         sheet = workbook.active
 
         headers = [str(cell.value).strip().lower() if cell.value else "" for cell in sheet[1]]
-        required_columns = {"dish_name", "quantity", "date"}
+        required_columns = {"dish_name", "quantity"}
         col_index = {h: i for i, h in enumerate(headers)}
 
         missing = required_columns - set(col_index.keys())
         if missing:
             raise HTTPException(status_code=400, detail=f"Missing required columns: {', '.join(missing)}")
 
-        success_count = 0
-        failed_rows = []
+        planning_report = []
+        total_estimated_cost = 0.0
+        feasible_count = 0
 
         for idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
             try:
+                if not row or all(cell is None for cell in row):
+                    continue
+
                 dish_name = str(row[col_index["dish_name"]]).strip()
                 quantity = float(row[col_index["quantity"]])
-                #date_str = str(row[col_index["date"]]).strip()
-                date_str = row[col_index["date"]]
-                date = datetime.strptime(date_str, "%Y-%m-%d")
 
-                #date = parser.parse(date_str).date()
-                '''
-                date_raw = row[col_index["date"]]
-                if isinstance(date_raw, datetime):
-                    date = date_raw
-                elif isinstance(date_raw, str):
-                    date= datetime.strptime(date_raw.strip(), "%Y-%m-%d")
-                else:
-                    raise ValueError("Invalid date format in 'date_added'")
-                '''
-                # Call your existing dish preparation logic here
-                # This is a simplified version
-                response = prepare_dish(dish_name, quantity, date, db)
-                if response.get("success"):
-                    success_count += 1
-                else:
-                    failed_rows.append(f"Row {idx}: {response.get('error')}")
+                if not dish_name or quantity <= 0:
+                    continue
+
+                # Check feasibility
+                check_result = prepare_dish_check(dish_name, quantity, db)
+
+                planning_report.append({
+                    "row": idx,
+                    "dish": dish_name,
+                    "servings": quantity,
+                    "feasible": check_result["can_prepare"],
+                    "estimated_cost": check_result["total_estimated_cost"],
+                    "ingredient_status": check_result["ingredients_status"]
+                })
+
+                if check_result["can_prepare"]:
+                    feasible_count += 1
+                    total_estimated_cost += check_result["total_estimated_cost"]
 
             except Exception as e:
-                failed_rows.append(f"Row {idx}: {str(e)}")
+                planning_report.append({
+                    "row": idx,
+                    "dish": dish_name if 'dish_name' in locals() else "Unknown",
+                    "feasible": False,
+                    "error": str(e)
+                })
 
         return {
-            "message": f"Processed {success_count} row(s) successfully.",
-            "errors": failed_rows
+            "planning_summary": {
+                "total_dishes": len(planning_report),
+                "feasible_dishes": feasible_count,
+                "feasibility_rate": round((feasible_count / len(planning_report) * 100), 2) if planning_report else 0,
+                "total_estimated_cost": round(total_estimated_cost, 2)
+            },
+            "detailed_report": planning_report,
+            "recommendation": "Ready for preparation" if feasible_count == len(
+                planning_report) else "Some dishes cannot be prepared due to insufficient inventory"
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=f"Planning analysis failed: {str(e)}")
 
 @app.get("/inventory_on_date")
 def inventory_on_date(date: str, db: Session = Depends(get_db)):
